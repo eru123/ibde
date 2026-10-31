@@ -27,17 +27,21 @@ pub use wayland_client::protocol::wl_callback;
 pub use wayland_client::protocol::wl_callback::WlCallback;
 pub use wayland_client::protocol::wl_compositor;
 pub use wayland_client::protocol::wl_compositor::WlCompositor;
+pub use wayland_client::protocol::wl_keyboard;
+pub use wayland_client::protocol::wl_keyboard::WlKeyboard;
 pub use wayland_client::protocol::wl_output;
 pub use wayland_client::protocol::wl_output::WlOutput;
 pub use wayland_client::protocol::wl_registry;
 pub use wayland_client::protocol::wl_registry::WlRegistry;
+pub use wayland_client::protocol::wl_seat;
+pub use wayland_client::protocol::wl_seat::WlSeat;
 pub use wayland_client::protocol::wl_shm;
 pub use wayland_client::protocol::wl_shm::WlShm;
 pub use wayland_client::protocol::wl_shm_pool;
 pub use wayland_client::protocol::wl_shm_pool::WlShmPool;
 pub use wayland_client::protocol::wl_surface;
 pub use wayland_client::protocol::wl_surface::WlSurface;
-pub use wayland_client::{Connection, Dispatch, QueueHandle};
+pub use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 pub use wayland_protocols::xdg::shell::client::xdg_surface;
 pub use wayland_protocols::xdg::shell::client::xdg_surface::XdgSurface;
 pub use wayland_protocols::xdg::shell::client::xdg_toplevel;
@@ -101,6 +105,27 @@ pub trait SessionHost {
     fn on_window_close(&mut self, id: u64) {
         let _ = id;
     }
+    /// Compositor keymap (fd owned by the host; feed it to
+    /// `ibde_ui::input::Keyboard::from_fd`).
+    fn on_keymap(&mut self, format: u32, fd: std::os::fd::OwnedFd, size: u32) {
+        let _ = (format, fd, size);
+    }
+    /// Keyboard focus entered one of our surfaces.
+    fn on_keyboard_enter(&mut self, surface: &WlSurface) {
+        let _ = surface;
+    }
+    /// Keyboard focus left one of our surfaces.
+    fn on_keyboard_leave(&mut self, surface: &WlSurface) {
+        let _ = surface;
+    }
+    /// Raw key event (evdev keycode; add 8 for xkb).
+    fn on_key(&mut self, keycode: u32, pressed: bool) {
+        let _ = (keycode, pressed);
+    }
+    /// wl_keyboard.modifiers payload.
+    fn on_modifiers(&mut self, depressed: u32, latched: u32, locked: u32, group: u32) {
+        let _ = (depressed, latched, locked, group);
+    }
     /// Frame callback for a surface: render, commit, re-request.
     fn on_frame(&mut self, surface_id: u64) {
         let _ = surface_id;
@@ -113,6 +138,7 @@ pub struct Session {
     pub shm: Option<WlShm>,
     pub layer_shell: Option<ZwlrLayerShellV1>,
     pub xdg_wm_base: Option<XdgWmBase>,
+    pub seat: Option<WlSeat>,
     next_id: u64,
 }
 
@@ -127,6 +153,7 @@ impl Session {
             + Dispatch<WlShm, ()>
             + Dispatch<ZwlrLayerShellV1, ()>
             + Dispatch<XdgWmBase, ()>
+            + Dispatch<WlSeat, ()>
             + 'static,
     {
         *state.session_slot() = Some(Session {
@@ -134,6 +161,7 @@ impl Session {
             shm: None,
             layer_shell: None,
             xdg_wm_base: None,
+            seat: None,
             next_id: 0,
         });
         let _registry = conn.display().get_registry(qh, RegistryData);
@@ -146,6 +174,16 @@ impl Session {
 
     pub fn ready(&self) -> bool {
         self.compositor.is_some() && self.shm.is_some()
+    }
+
+    /// Bind the seat's keyboard (call after the globals roundtrip).
+    /// The compositor's keymap and key events follow via SessionHost.
+    pub fn keyboard<D>(&mut self, qh: &QueueHandle<D>) -> Option<WlKeyboard>
+    where
+        D: Dispatch<WlKeyboard, ()> + 'static,
+    {
+        let seat = self.seat.as_ref()?;
+        Some(seat.get_keyboard(qh, ()))
     }
 
     /// Create a layer surface per `spec` and commit it; the configure
@@ -270,6 +308,7 @@ pub fn handle_registry_global<D>(
         + Dispatch<WlShm, ()>
         + Dispatch<ZwlrLayerShellV1, ()>
         + Dispatch<XdgWmBase, ()>
+        + Dispatch<WlSeat, ()>
         + 'static,
 {
     let was_ready = state.session_slot().as_ref().is_some_and(|s| s.ready());
@@ -285,6 +324,7 @@ pub fn handle_registry_global<D>(
             "xdg_wm_base" => {
                 session.xdg_wm_base = Some(registry.bind(name, version.min(1), qh, ()))
             }
+            "wl_seat" => session.seat = Some(registry.bind(name, version.min(4), qh, ())),
             _ => {}
         }
     }
@@ -457,6 +497,73 @@ macro_rules! delegate_ibde_session {
                     }
                     $crate::session::xdg_toplevel::Event::Close => {
                         state.on_window_close(data.id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::WlSeat, ()> for $app {
+            fn event(
+                state: &mut Self,
+                seat: &$crate::session::WlSeat,
+                event: $crate::session::wl_seat::Event,
+                _data: &(),
+                _conn: &$crate::session::Connection,
+                qh: &$crate::session::QueueHandle<Self>,
+            ) {
+                if let $crate::session::wl_seat::Event::Capabilities { capabilities } = event {
+                    use $crate::session::wl_seat::Capability;
+                    if let $crate::session::WEnum::Value(caps) = capabilities {
+                        if caps.contains(Capability::Keyboard) {
+                            let _ = seat.get_keyboard(qh, ());
+                        }
+                    }
+                }
+                let _ = state;
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::WlKeyboard, ()> for $app {
+            fn event(
+                state: &mut Self,
+                _kb: &$crate::session::WlKeyboard,
+                event: $crate::session::wl_keyboard::Event,
+                _data: &(),
+                _conn: &$crate::session::Connection,
+                _qh: &$crate::session::QueueHandle<Self>,
+            ) {
+                use $crate::session::wl_keyboard::{KeyState, KeymapFormat};
+                match event {
+                    $crate::session::wl_keyboard::Event::Keymap { format, fd, size } => {
+                        if matches!(format, $crate::session::WEnum::Value(KeymapFormat::XkbV1)) {
+                            // fd arrives as an OwnedFd — we take ownership
+                            state.on_keymap(1, fd, size);
+                        }
+                    }
+                    $crate::session::wl_keyboard::Event::Enter { surface, .. } => {
+                        state.on_keyboard_enter(&surface);
+                    }
+                    $crate::session::wl_keyboard::Event::Leave { surface, .. } => {
+                        state.on_keyboard_leave(&surface);
+                    }
+                    $crate::session::wl_keyboard::Event::Key {
+                        key,
+                        state: keystate,
+                        ..
+                    } => {
+                        let pressed =
+                            matches!(keystate, $crate::session::WEnum::Value(KeyState::Pressed));
+                        state.on_key(key, pressed);
+                    }
+                    $crate::session::wl_keyboard::Event::Modifiers {
+                        mods_depressed,
+                        mods_latched,
+                        mods_locked,
+                        group,
+                        ..
+                    } => {
+                        state.on_modifiers(mods_depressed, mods_latched, mods_locked, group);
                     }
                     _ => {}
                 }

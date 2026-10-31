@@ -42,6 +42,10 @@ struct App {
     default_rows: usize,
     font_size: i32,
     configured: bool,
+    // input
+    focused: bool,
+    kbd: Option<ibde_ui::input::Keyboard>,
+    writer: Option<Box<dyn std::io::Write + Send>>,
 }
 
 impl App {
@@ -62,6 +66,9 @@ impl App {
             default_rows,
             font_size,
             configured: false,
+            focused: false,
+            kbd: None,
+            writer: None,
         }
     }
 
@@ -163,6 +170,44 @@ impl SessionHost for App {
     fn on_window_close(&mut self, _id: u64) {
         RUNNING.store(false, Ordering::Relaxed);
     }
+
+    fn on_keymap(&mut self, _format: u32, fd: std::os::fd::OwnedFd, size: u32) {
+        match ibde_ui::input::Keyboard::from_fd(fd, size as usize) {
+            Some(k) => self.kbd = Some(k),
+            None => eprintln!("[term] keymap rejected"),
+        }
+    }
+
+    fn on_keyboard_enter(&mut self, surface: &WlSurface) {
+        self.focused = self.surface.as_ref() == Some(surface);
+    }
+
+    fn on_keyboard_leave(&mut self, _surface: &WlSurface) {
+        self.focused = false;
+    }
+
+    fn on_modifiers(&mut self, depressed: u32, latched: u32, locked: u32, group: u32) {
+        if let Some(k) = self.kbd.as_mut() {
+            k.update_mask(depressed, latched, locked, group);
+        }
+    }
+
+    fn on_key(&mut self, keycode: u32, pressed: bool) {
+        if !pressed || !self.focused {
+            return;
+        }
+        let Some(k) = self.kbd.as_ref() else { return };
+        let ev = k.translate(keycode + 8);
+        let bytes = ibde_ui::input::key_to_terminal_bytes(&ev);
+        if bytes.is_empty() {
+            return;
+        }
+        if let Some(w) = self.writer.as_mut() {
+            use std::io::Write;
+            let _ = w.write_all(&bytes);
+            let _ = w.flush();
+        }
+    }
 }
 
 ibde_ui::delegate_ibde_session!(App);
@@ -258,6 +303,13 @@ fn main() {
     let _ = conn.flush();
     queue.roundtrip(&mut app).expect("no window configure");
     assert!(app.configured, "window never configured");
+
+    // keyboard (compositor keymap follows via on_keymap, if a seat exists)
+    if let Some(session) = app.session.as_mut() {
+        let _keyboard = session.keyboard(&qh);
+    }
+    // PTY writer for keyboard input
+    app.writer = Some(pair.master.take_writer().expect("pty writer"));
 
     // --- Main loop: PTY channel + wayland, poll-free via recv_timeout ---
     let mut feed = Feed::new();

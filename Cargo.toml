@@ -24,6 +24,7 @@ memmap2 = "0.9"
 libc = "0.2"
 vte = "0.13"
 portable-pty = "0.8"
+xkbcommon = "0.8"
 
 [profile.release]
 lto = "thin"

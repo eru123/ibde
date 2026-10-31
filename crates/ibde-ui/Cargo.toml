@@ -14,3 +14,4 @@ pango.workspace = true
 pangocairo.workspace = true
 memmap2.workspace = true
 libc.workspace = true
+xkbcommon.workspace = true
