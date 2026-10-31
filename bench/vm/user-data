@@ -1,4 +1,7 @@
 #cloud-config
+# Two-phase bench (run-bench.sh boots the VM twice):
+#   boot 1 (provision): this config applies, then powers off
+#   boot 2 (measure): autologin starts labwc+waybar on a prepared machine
 hostname: ibde-bench
 manage_etc_hosts: true
 ssh_pwauth: true
@@ -19,13 +22,12 @@ write_files:
     permissions: "0755"
     content: |
       #!/bin/sh
-      # Started from .profile on the serial console autologin.
+      # Started from .profile on the serial console autologin (measure boot).
       export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
       export WLR_RENDERER=pixman
       export XKB_DEFAULT_LAYOUT=us
       export LIBSEAT_BACKEND=seatd
-      # wait for the seatd socket (races with cloud-init final on re-provision)
-      for i in $(seq 1 20); do [ -S /run/seatd.sock ] && break; sleep 1; done
+      for i in $(seq 1 30); do [ -S /run/seatd.sock ] && break; sleep 1; done
       exec labwc -s /usr/local/bin/ibde-bench-measure
   - path: /usr/local/bin/ibde-bench-measure
     permissions: "0755"
@@ -46,12 +48,16 @@ write_files:
       sleep 1
       sudo -n poweroff
 runcmd:
+  # Debian's seatd grants seat access via the video group (there is no
+  # 'seatd' group); DRM nodes are video-group too.
+  - usermod -aG video debian
+  - systemctl enable --now seatd
   - mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
   - |
     printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin debian 115200 ttyS0 xterm\n' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
-  - usermod -aG seatd debian
-  - systemctl enable --now seatd
   - systemctl daemon-reload
-  - systemctl restart serial-getty@ttyS0.service
   - |
     grep -q ibde-bench-session /home/debian/.profile || printf 'if [ "$(tty 2>/dev/null)" = "/dev/ttyS0" ] && [ -z "$IBDE_BENCH" ]; then\n  IBDE_BENCH=1; export IBDE_BENCH\n  /usr/local/bin/ibde-bench-session\n  # labwc exited (crash or end): never hang the runner\n  sleep 5\n  sudo -n poweroff\nfi\n' >> /home/debian/.profile
+  # provision done — power off; the measure boot starts clean
+  - sleep 2
+  - poweroff
