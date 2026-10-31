@@ -21,6 +21,7 @@
 #include <stdbool.h>
 #include <math.h>
 #include <time.h>
+#include <poll.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -346,12 +347,27 @@ int main(int argc, char **argv)
     if (!st.buf.wlbuf)
         buffer_create(&st, 1280, BAR_H);
 
+    /* Initial frame: commit with damage so the compositor repaints and
+       starts delivering frame callbacks (headless needs the first push). */
     st.t0_ms = now_ms();
+    render(&st, st.buf.cr, st.buf.w, st.buf.h, 0.0);
+    wl_surface_attach(st.surface, st.buf.wlbuf, 0, 0);
+    wl_surface_damage_buffer(st.surface, 0, 0, st.buf.w, st.buf.h);
+    wl_surface_commit(st.surface);
+    wl_display_flush(st.disp);
+
     struct wl_callback *cb = wl_surface_frame(st.surface);
     wl_callback_add_listener(cb, &frame_listener, &st);
     wl_surface_commit(st.surface);
+    wl_display_flush(st.disp);
 
-    while (st.running && wl_display_dispatch(st.disp) != -1) {
+    /* poll-based loop: guarantees exit even if callbacks stop */
+    while (st.running) {
+        struct pollfd pfd = { wl_display_get_fd(st.disp), POLLIN };
+        int ready = poll(&pfd, 1, 200);
+        if (ready < 0) die("poll failed");
+        if (ready > 0 && wl_display_dispatch(st.disp) == -1)
+            die("display dispatch error");
         if ((now_ms() - st.t0_ms) / 1000.0 >= st.seconds) break;
     }
 

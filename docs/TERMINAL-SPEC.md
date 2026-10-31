@@ -7,9 +7,10 @@ users, and stay beginner friendly. First-party component from Phase 1
 
 ## Core decisions
 
-- **libvterm** for VT emulation (no VTE, no GTK). Rendering via
-  `libibde-ui`'s **text-grid fast path** (ADR-0004): glyph atlas,
-  damage-tracked partial redraw, O(1) scrolling.
+- **`vte` crate** (pure-Rust VT parser, alacritty-proven) for emulation —
+  no libvterm FFI, no VTE/GTK (ADR-0012). Rendering via `ibde-ui`'s
+  **text-grid fast path** (ADR-0004): glyph atlas, damage-tracked partial
+  redraw, O(1) scrolling.
 - Budget: **≤ 15 MB RSS typical**, ≤ 25 MB with 10k scrollback. (VTE+GTK3
   costs 40–60 MB — disqualifying at the floor.)
 

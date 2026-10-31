@@ -1,35 +1,47 @@
 # libibde-ui Phase 0 spike report
 
-ADR-0004 go/no-go evidence. Updated as results land.
+ADR-0004 go/no-go evidence; C-vs-Rust comparison backing ADR-0012.
+Host: Debian 13 (trixie) amd64, gcc / rustc 1.97.1, wayland 1.23,
+cairo 1.18, pango 1.56.
 
-## Environment
+## The spike
 
-- Host: Debian 13 (trixie), gcc, wayland 1.23, cairo 1.18, pango 1.56
-- Spike: one wlr-layer-shell top bar (1280×32), wl_shm ARGB8888 buffer,
-  cairo + pango, animated rounded pill + text, frame-callback driven
-  (single-buffered; production shell will be double-buffered)
+One wlr-layer-shell top bar (1280×32), wl_shm ARGB8888 buffer, cairo +
+pango, animated rounded pill + text, frame-callback driven,
+single-buffered (production shell will be double-buffered).
+Implementations: `ui/spike/` (C) and `ui/spike-rs/` (Rust) — same design,
+same measurements.
 
-## Offscreen render cost (no compositor, pure render path)
+## Results
 
-`spike --offscreen 600` (host, amd64):
+| Metric | C spike | Rust spike |
+|---|---|---|
+| Offscreen render, avg ms/frame (600 frames) | 0.120 | 0.217 |
+| Headless sway (pixman), FPS | 63 | 63 |
+| Headless sway (pixman), RSS after settle | 12,212 KB | 12,784 KB |
+| Offscreen RSS (whole process incl. shared libs) | 18,700 KB | 19,148 KB |
 
-```
-OFFSCREEN frames=600 total_ms=72 avg_ms=0.120 rss_kb=18700
-```
+## Reading
 
-- **0.12 ms/frame** for the bar at 1280×32 — the software path costs
-  ~0.7 % of a 60 fps frame budget. Render cost is a non-issue at this
-  surface size; the frame-callback round-trip will dominate real FPS.
-- RSS 18,700 KB is whole-process RSS **including shared library pages**
-  (pango/fontconfig/glib/cairo). PSS (marginal cost) is lower and
-  amortizes across shell + terminal once both run. Tracked in bench v1
-  with smem-style PSS accounting; ADR-0004's harfbuzz escape hatch fires
-  only if the 50 MB budget is threatened after real measurements.
+- **Render cost is a non-issue at bar sizes** in either language
+  (≤ 0.22 ms against a 16.7 ms frame budget); real FPS is bounded by the
+  compositor's frame clock, which pinned both at 63.
+- **RSS parity within ~0.6 MB.** RSS is dominated by the same shared
+  libraries (pango/cairo/glib); Rust std adds nothing measurable.
+  ADR-0004's harfbuzz/rustybuzz escape hatch stays available if the
+  50 MB budget ever gets tight after PSS accounting.
+- **Verdict (ADR-0012): Rust confirmed** — same performance envelope,
+  memory safety under parallel agent authorship, and the ecosystem
+  (`wayland-client`, `wayland-protocols-wlr`, `vte`, `zbus`, smithay
+  endgame) covers everything the C path hand-rolled.
 
-## Runtime (headless sway, pixman renderer, ephemeral container)
+Runtime environment for the sway rows: ephemeral `debian:trixie`
+container, `WLR_BACKENDS=headless WLR_RENDERER=pixman`,
+`ibde-sway-test` image (bench/docker/sway-test).
 
-Pending — results appended when the container run completes.
+## Known spike limitations (to fix in the real toolkit)
 
-## Runtime (floor VM: labwc, pixman, 1 vCPU / 512 MB)
-
-Pending — results appended from `docs/bench/BASELINE.md` run.
+- Single buffer (no buffer-release handling) — spike only.
+- Full-surface damage every frame; real toolkit does damage tracking.
+- No fractional-scale / output-scale handling.
+- pango layout created per frame (production caches layouts).

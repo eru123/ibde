@@ -1,6 +1,7 @@
 # build artifacts
 build/
 dist/
+target/
 *.o
 compile_commands.json
 .cache/

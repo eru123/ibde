@@ -29,14 +29,14 @@ in `docs/adr/`. See `docs/ROADMAP.md` for the plan and
 | Path | Contents |
 |---|---|
 | `docs/` | ADRs, roadmap, UX spec, terminal spec, contracts, bench reports |
-| `ui/` | `libibde-ui` — retained-mode C toolkit (GLES2 + pixman backends) |
+| `ui/` | `ibde-ui` — retained-mode Rust toolkit crate (GLES2 + pixman backends); `spike/` (C) and `spike-rs/` are the Phase 0 comparison artifacts |
 | `shell/` | `ibde-shell` — menubar, dock, launcher, notifications, lock, OSD |
-| `terminal/` | `ibde-terminal` — flagship terminal (libvterm + libibde-ui) |
-| `comp/` | compositor integration (labwc adopt → surgical fork → own) |
+| `terminal/` | `ibde-terminal` — flagship terminal (`vte` crate + ibde-ui) |
+| `comp/` | compositor integration (labwc adopt → smithay/labwc fork → own) |
 | `settings/` | `ibde-settingsd` + settings schema |
 | `session/` | session bootstrap, systemd user units, greeter |
 | `theme/` | GTK app theme, icon theme, wallpapers, accents |
-| `bench/` | `ibde-bench` — floor-profile performance harness |
+| `bench/` | `ibde-bench` — floor-profile performance harness + test images |
 | `packaging/` | Debian packaging |
 
 ## License
