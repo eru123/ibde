@@ -1,0 +1,50 @@
+#cloud-config
+hostname: ibde-bench
+manage_etc_hosts: true
+ssh_pwauth: true
+chpasswd:
+  expire: false
+  users:
+    - name: debian
+      password: ibdebench
+      type: text
+packages:
+  - labwc
+  - waybar
+write_files:
+  - path: /usr/local/bin/ibde-bench-session
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # Started from .profile on the serial console autologin.
+      export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+      export WLR_RENDERER=pixman
+      export XKB_DEFAULT_LAYOUT=us
+      export WLR_LIBINPUT_NO_DEVICES=1
+      exec labwc -s /usr/local/bin/ibde-bench-measure
+  - path: /usr/local/bin/ibde-bench-measure
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # labwc -s runs this; stdout/stderr land on the serial tty.
+      waybar &
+      sleep 15
+      echo "=== ibde-bench baseline ==="
+      date
+      echo "--- free -m ---"
+      free -m
+      echo "--- per-process RSS KiB (top 30) ---"
+      ps -eo rss,comm --sort=-rss --no-headers | head -30
+      echo "--- session process count ---"
+      ps -e --no-headers | wc -l
+      echo "=== end ==="
+      sleep 1
+      sudo -n poweroff
+runcmd:
+  - mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
+  - |
+    printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin debian -o "-p -- \\u" 115200 ttyS0 xterm\n' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
+  - systemctl daemon-reload
+  - systemctl restart serial-getty@ttyS0.service
+  - |
+    printf 'if [ "$(tty 2>/dev/null)" = "/dev/ttyS0" ] && [ -z "$IBDE_BENCH" ]; then\n  IBDE_BENCH=1; export IBDE_BENCH\n  exec /usr/local/bin/ibde-bench-session\nfi\n' >> /home/debian/.profile

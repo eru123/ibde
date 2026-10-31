@@ -1,0 +1,16 @@
+# build artifacts
+build/
+dist/
+*.o
+compile_commands.json
+.cache/
+
+# bench VM artifacts
+*.qcow2
+*.iso
+serial*.log
+qemu.pid
+http-server.log
+seed/
+.tools/
+deps-prefix/

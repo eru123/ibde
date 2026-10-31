@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IBDE settings schema (draft v0)",
+  "description": "Keyfiles at /etc/ibde/*.conf and ~/.config/ibde/*.conf validate against this. See ADR-0006.",
+  "type": "object",
+  "properties": {
+    "appearance": {
+      "type": "object",
+      "properties": {
+        "mode": { "enum": ["light", "dark"], "default": "light" },
+        "accent": {
+          "enum": ["graphite", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"],
+          "default": "graphite"
+        },
+        "wallpaper": { "type": "string", "default": "" }
+      }
+    },
+    "keyboard": {
+      "type": "object",
+      "properties": {
+        "profile": { "enum": ["linux", "mac"], "default": "linux" },
+        "layout": { "type": "string", "default": "auto" },
+        "detection-suggests-mac": { "type": "boolean", "default": true }
+      }
+    },
+    "dock": {
+      "type": "object",
+      "properties": {
+        "autohide": { "type": "boolean", "default": false },
+        "magnification": { "enum": ["auto", "on", "off"], "default": "auto" },
+        "size": { "type": "integer", "minimum": 32, "maximum": 96, "default": 56 },
+        "pinned": { "type": "array", "items": { "type": "string" }, "default": ["files", "terminal", "settings"] }
+      }
+    },
+    "menubar": {
+      "type": "object",
+      "properties": {
+        "autohide": { "type": "boolean", "default": false },
+        "clock-format": { "type": "string", "default": "%a %e %b  %H:%M" }
+      }
+    },
+    "profile": { "enum": ["simple", "power"], "default": "simple" },
+    "terminal": {
+      "type": "object",
+      "properties": {
+        "font-size": { "type": "integer", "minimum": 8, "maximum": 32, "default": 12 },
+        "scrollback": { "type": "integer", "minimum": 1000, "default": 10000 },
+        "ligatures": { "enum": ["auto", "on", "off"], "default": "auto" }
+      }
+    }
+  }
+}
