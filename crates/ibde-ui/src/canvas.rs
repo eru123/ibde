@@ -17,12 +17,12 @@ pub struct Canvas {
 
 impl Canvas {
     pub fn new(width: i32, height: i32) -> cairo::Result<Self> {
-        let surface = cairo::ImageSurface::create(
-            cairo::Format::ARgb32,
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height)?;
+        Ok(Self {
+            surface,
             width,
             height,
-        )?;
-        Ok(Self { surface, width, height })
+        })
     }
 
     pub fn context(&self) -> cairo::Result<cairo::Context> {
@@ -74,19 +74,24 @@ pub fn draw_label(
 }
 
 /// Fill a rounded "pill" (fully-rounded end caps).
-pub fn fill_pill(
-    cr: &cairo::Context,
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-    rgba: (f64, f64, f64, f64),
-) {
+pub fn fill_pill(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, rgba: (f64, f64, f64, f64)) {
     let r = h / 2.0;
     let cy = y + r;
     cr.set_source_rgba(rgba.0, rgba.1, rgba.2, rgba.3);
-    cr.arc(x + r, cy, r, std::f64::consts::FRAC_PI_2, 3.0 * std::f64::consts::FRAC_PI_2);
-    cr.arc(x + w - r, cy, r, -std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
+    cr.arc(
+        x + r,
+        cy,
+        r,
+        std::f64::consts::FRAC_PI_2,
+        3.0 * std::f64::consts::FRAC_PI_2,
+    );
+    cr.arc(
+        x + w - r,
+        cy,
+        r,
+        -std::f64::consts::FRAC_PI_2,
+        std::f64::consts::FRAC_PI_2,
+    );
     cr.close_path();
     let _ = cr.fill();
 }
@@ -107,7 +112,14 @@ mod tests {
                 cr.set_source_rgba(0.92, 0.92, 0.94, 0.88);
                 cr.rectangle(0.0, 0.0, 320.0, 32.0);
                 let _ = cr.fill();
-                fill_pill(&cr, 8.0, 4.0, 80.0 + t * 10.0, 24.0, (0.35, 0.38, 0.45, 1.0));
+                fill_pill(
+                    &cr,
+                    8.0,
+                    4.0,
+                    80.0 + t * 10.0,
+                    24.0,
+                    (0.35, 0.38, 0.45, 1.0),
+                );
                 let _ = draw_label(&cr, "determinism", &font, 100.0, 8.0, (0.1, 0.1, 0.12, 1.0));
             }
             let x = c.surface_mut().data().unwrap().to_vec();

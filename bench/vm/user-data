@@ -13,6 +13,7 @@ chpasswd:
 packages:
   - labwc
   - waybar
+  - seatd
 write_files:
   - path: /usr/local/bin/ibde-bench-session
     permissions: "0755"
@@ -22,7 +23,9 @@ write_files:
       export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
       export WLR_RENDERER=pixman
       export XKB_DEFAULT_LAYOUT=us
-      export WLR_LIBINPUT_NO_DEVICES=1
+      export LIBSEAT_BACKEND=seatd
+      # wait for the seatd socket (races with cloud-init final on re-provision)
+      for i in $(seq 1 20); do [ -S /run/seatd.sock ] && break; sleep 1; done
       exec labwc -s /usr/local/bin/ibde-bench-measure
   - path: /usr/local/bin/ibde-bench-measure
     permissions: "0755"
@@ -46,7 +49,9 @@ runcmd:
   - mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
   - |
     printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin debian 115200 ttyS0 xterm\n' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
+  - usermod -aG seatd debian
+  - systemctl enable --now seatd
   - systemctl daemon-reload
   - systemctl restart serial-getty@ttyS0.service
   - |
-    printf 'if [ "$(tty 2>/dev/null)" = "/dev/ttyS0" ] && [ -z "$IBDE_BENCH" ]; then\n  IBDE_BENCH=1; export IBDE_BENCH\n  exec /usr/local/bin/ibde-bench-session\nfi\n' >> /home/debian/.profile
+    grep -q ibde-bench-session /home/debian/.profile || printf 'if [ "$(tty 2>/dev/null)" = "/dev/ttyS0" ] && [ -z "$IBDE_BENCH" ]; then\n  IBDE_BENCH=1; export IBDE_BENCH\n  /usr/local/bin/ibde-bench-session\n  # labwc exited (crash or end): never hang the runner\n  sleep 5\n  sudo -n poweroff\nfi\n' >> /home/debian/.profile

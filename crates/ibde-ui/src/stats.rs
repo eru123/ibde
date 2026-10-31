@@ -31,7 +31,11 @@ pub struct FpsCounter {
 
 impl FpsCounter {
     pub fn new() -> Self {
-        Self { t0: Instant::now(), last_report: Instant::now(), frames: 0 }
+        Self {
+            t0: Instant::now(),
+            last_report: Instant::now(),
+            frames: 0,
+        }
     }
 
     /// Record a frame. Returns `Some((fps_since_last_report, elapsed_s))`

@@ -9,13 +9,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use ibde_ui::canvas::{self, Canvas};
 use ibde_ui::shm::ShmBuffer;
 use ibde_ui::stats::{rss_kb, FpsCounter};
-use ibde_ui::canvas::{self, Canvas};
 use pango::FontDescription;
 use wayland_client::protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_output, wl_registry, wl_shm,
-    wl_shm_pool, wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols_wlr::layer_shell::v1::client::{
@@ -80,10 +79,20 @@ fn draw(c: &Canvas, t: f64, frames: u32, font: &FontDescription) {
     // animated accent pill (ibde-ui helper — dogfooding)
     let pulse = 0.80 + 0.20 * (t * 2.0).sin();
     let pw = 180.0 + 40.0 * (t * 1.3).sin();
-    canvas::fill_pill(&cr, 16.0, 0.0, pw, c.height as f64, (0.35, 0.38, 0.45, pulse));
+    canvas::fill_pill(
+        &cr,
+        16.0,
+        0.0,
+        pw,
+        c.height as f64,
+        (0.35, 0.38, 0.45, pulse),
+    );
 
     // text (ibde-ui helper)
-    let text = format!("IBDE spike (rust) {}x{} frame {}", c.width, c.height, frames);
+    let text = format!(
+        "IBDE spike (rust) {}x{} frame {}",
+        c.width, c.height, frames
+    );
     let (_tw, th) = canvas::label_size(&cr, &text, font);
     canvas::draw_label(
         &cr,
@@ -113,7 +122,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
         _conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
             match interface.as_str() {
                 "wl_compositor" => {
                     state.compositor = Some(registry.bind(name, version.min(4), qh, ()))
@@ -138,7 +152,11 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
         _qh: &QueueHandle<Self>,
     ) {
         match event {
-            zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
+            zwlr_layer_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
                 ls.ack_configure(serial);
                 state.cfg_w = width as i32;
                 state.cfg_h = height as i32;

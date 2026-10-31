@@ -27,16 +27,9 @@ impl ShmBuffer {
     /// Create a buffer on `shm`. The caller's state type `D` must noop or
     /// handle `WlShmPool`/`WlBuffer` events (`delegate_noop!` with
     /// `ignore wl_buffer::WlBuffer` covers it).
-    pub fn new<D>(
-        shm: &wl_shm::WlShm,
-        width: i32,
-        height: i32,
-        qh: &QueueHandle<D>,
-    ) -> Self
+    pub fn new<D>(shm: &wl_shm::WlShm, width: i32, height: i32, qh: &QueueHandle<D>) -> Self
     where
-        D: Dispatch<wl_shm_pool::WlShmPool, ()>
-            + Dispatch<wl_buffer::WlBuffer, ()>
-            + 'static,
+        D: Dispatch<wl_shm_pool::WlShmPool, ()> + Dispatch<wl_buffer::WlBuffer, ()> + 'static,
     {
         let stride = width * 4;
         let size = (stride * height) as usize;
@@ -51,9 +44,16 @@ impl ShmBuffer {
         // SAFETY: fd is a fresh memfd of exactly `size` bytes.
         let mmap = unsafe { MmapMut::map_mut(file.as_raw_fd()) }.expect("mmap failed");
         let pool = shm.create_pool(file.as_fd(), size as i32, qh, ());
-        let buffer =
-            pool.create_buffer(0, width, height, stride, wl_shm::Format::Argb8888, qh, ());
-        Self { _fd: file, mmap, _pool: pool, buffer, width, height, stride }
+        let buffer = pool.create_buffer(0, width, height, stride, wl_shm::Format::Argb8888, qh, ());
+        Self {
+            _fd: file,
+            mmap,
+            _pool: pool,
+            buffer,
+            width,
+            height,
+            stride,
+        }
     }
 
     pub fn wayland_buffer(&self) -> &wl_buffer::WlBuffer {
@@ -63,8 +63,11 @@ impl ShmBuffer {
     /// Copy `bytes` (a full frame, ARGB8888, exactly `stride × height`)
     /// into the buffer.
     pub fn write_frame(&mut self, bytes: &[u8]) {
-        assert_eq!(bytes.len(), (self.stride * self.height) as usize,
-            "frame size mismatch");
+        assert_eq!(
+            bytes.len(),
+            (self.stride * self.height) as usize,
+            "frame size mismatch"
+        );
         self.mmap.copy_from_slice(bytes);
     }
 }
