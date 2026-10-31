@@ -2,6 +2,8 @@
 hostname: ibde-bench
 manage_etc_hosts: true
 ssh_pwauth: true
+ssh_authorized_keys:
+  - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL5HeJYwCWJiVs+F+qbn0d4Fdv7mVHGHX12E2eVViJqJ ibde-bench
 chpasswd:
   expire: false
   users:
@@ -43,7 +45,7 @@ write_files:
 runcmd:
   - mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
   - |
-    printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin debian -o "-p -- \\u" 115200 ttyS0 xterm\n' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
+    printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin debian 115200 ttyS0 xterm\n' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
   - systemctl daemon-reload
   - systemctl restart serial-getty@ttyS0.service
   - |

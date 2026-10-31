@@ -24,7 +24,7 @@ qemu-system-x86_64 \
   -device virtio-vga \
   -display none \
   -serial file:serial.log \
-  -smbios type=1,serial=ds=nocloud-net;s=http://10.0.2.2:8123/ \
+  -smbios "type=1,serial=ds=nocloud-net;s=http://10.0.2.2:8123/" \
   -no-reboot \
   -daemonize -pidfile qemu.pid
 
