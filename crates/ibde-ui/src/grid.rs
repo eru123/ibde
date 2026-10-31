@@ -7,7 +7,7 @@
 //! tested and benchmarkable anywhere.
 
 /// RGB color, 8 bits/channel.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
 /// Per-cell text attributes (bitflags).
@@ -40,7 +40,12 @@ pub struct Cell {
 
 impl Default for Cell {
     fn default() -> Self {
-        Cell { ch: ' ', fg: Rgb(0x1d, 0x1d, 0x20), bg: Rgb(0xfa, 0xfa, 0xf8), attrs: Attrs(0) }
+        Cell {
+            ch: ' ',
+            fg: Rgb(0x1d, 0x1d, 0x20),
+            bg: Rgb(0xfa, 0xfa, 0xf8),
+            attrs: Attrs(0),
+        }
     }
 }
 
@@ -62,7 +67,10 @@ pub struct Damage {
 
 impl Damage {
     fn new(rows: usize) -> Self {
-        Damage { full: true, rows: vec![false; rows] }
+        Damage {
+            full: true,
+            rows: vec![false; rows],
+        }
     }
 
     pub fn mark_row(&mut self, y: usize) {
@@ -215,10 +223,10 @@ impl TextGrid {
     }
 
     /// Run-length segments of cells with identical visual style in a
-    /// row — what the future glyph-atlas renderer batches on. Each entry
-    /// is (start_col, representative_cell) where the representative
-    /// carries the run's style (attrs + colors).
-    pub fn row_style_runs(&self, y: usize) -> Vec<(usize, Cell)> {
+    /// row — what the glyph-atlas renderer batches on. Each entry is
+    /// (start_col, len, representative_cell); the representative carries
+    /// the run's style (attrs + colors), characters vary within the run.
+    pub fn row_style_runs(&self, y: usize) -> Vec<(usize, usize, Cell)> {
         let mut out = Vec::new();
         if y >= self.rows {
             return out;
@@ -227,11 +235,11 @@ impl TextGrid {
         let mut run_start = 0;
         for (i, c) in row.iter().enumerate() {
             if i > 0 && !c.same_style(&row[i - 1]) {
-                out.push((run_start, row[i - 1]));
+                out.push((run_start, i - run_start, row[i - 1]));
                 run_start = i;
             }
         }
-        out.push((run_start, row[self.cols - 1]));
+        out.push((run_start, self.cols - run_start, row[self.cols - 1]));
         out
     }
 }
@@ -241,7 +249,10 @@ mod tests {
     use super::*;
 
     fn cell_a(ch: char) -> Cell {
-        Cell { ch, ..Cell::default() }
+        Cell {
+            ch,
+            ..Cell::default()
+        }
     }
 
     #[test]
@@ -300,17 +311,39 @@ mod tests {
         let mut g = TextGrid::new(4, 1);
         g.set(0, 0, cell_a('h'));
         g.set(1, 0, cell_a('i'));
-        g.set(2, 0, Cell { ch: '!', attrs: Attrs::BOLD, ..cell_a('!') });
-        g.set(3, 0, Cell { ch: '?', attrs: Attrs::BOLD, ..cell_a('?') });
+        g.set(
+            2,
+            0,
+            Cell {
+                ch: '!',
+                attrs: Attrs::BOLD,
+                ..cell_a('!')
+            },
+        );
+        g.set(
+            3,
+            0,
+            Cell {
+                ch: '?',
+                attrs: Attrs::BOLD,
+                ..cell_a('?')
+            },
+        );
         let runs = g.row_style_runs(0);
         assert_eq!(runs.len(), 2); // "hi" plain + "!?" bold
-        assert_eq!(runs[0].0, 0);
-        assert_eq!(runs[1].0, 2);
+                                   // representatives carry style only — they're the last cell
+                                   // before each style boundary
+        assert_eq!(runs[0], (0, 2, g.get(1, 0).unwrap()));
+        assert_eq!(runs[1], (2, 2, g.get(3, 0).unwrap()));
     }
 
     #[test]
     fn cell_size_budget() {
         // ADR-0011 budget math assumes ~16-byte cells.
-        assert!(std::mem::size_of::<Cell>() <= 16, "Cell is {} bytes", std::mem::size_of::<Cell>());
+        assert!(
+            std::mem::size_of::<Cell>() <= 16,
+            "Cell is {} bytes",
+            std::mem::size_of::<Cell>()
+        );
     }
 }

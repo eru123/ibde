@@ -12,6 +12,7 @@
 //! Design rule: no GTK, no gsettings; shared-library footprint is the
 //! budget (ADR-0002), so every dependency here must earn its RSS.
 
+pub mod atlas;
 pub mod canvas;
 pub mod grid;
 pub mod shm;
