@@ -167,13 +167,13 @@ impl GlyphAtlas {
 
             // blit scratch into the atlas slot
             let atlas_cr = Cr::new(&self.surface).expect("atlas ctx");
-            atlas_cr.set_source_surface(&scratch, 0.0, 0.0);
+            let _ = atlas_cr.set_source_surface(&scratch, 0.0, 0.0);
             atlas_cr.rectangle(u as f64, v as f64, w as f64, h as f64);
             atlas_cr.fill().expect("atlas blit");
 
             let info = GlyphInfo { u, v, w, h };
             self.map.insert(key, info);
-            return info;
+            info
         }
     }
 }
@@ -223,7 +223,7 @@ pub fn render_grid(atlas: &mut GlyphAtlas, canvas: &Canvas, grid: &mut TextGrid)
             }
             let info = atlas.glyph(&cell);
             let cx = (x * atlas.cell_w as usize) as f64;
-            cr.set_source_surface(
+            let _ = cr.set_source_surface(
                 &atlas.surface,
                 cx - info.u as f64,
                 cy + (atlas.ascent - atlas.cell_h) as f64 - info.v as f64,
@@ -238,7 +238,7 @@ pub fn render_grid(atlas: &mut GlyphAtlas, canvas: &Canvas, grid: &mut TextGrid)
             stats.glyphs_blitted += 1;
         }
     }
-    let _ = canvas.surface().flush();
+    canvas.surface().flush();
     stats
 }
 
