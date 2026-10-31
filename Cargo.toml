@@ -15,6 +15,7 @@ repository = "https://github.com/eru123/ibde"
 [workspace.dependencies]
 ibde-ui = { path = "crates/ibde-ui" }
 wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 cairo-rs = "0.20"
 pango = "0.20"
@@ -22,6 +23,7 @@ pangocairo = "0.20"
 memmap2 = "0.9"
 libc = "0.2"
 vte = "0.13"
+portable-pty = "0.8"
 
 [profile.release]
 lto = "thin"

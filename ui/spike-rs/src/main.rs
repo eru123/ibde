@@ -243,7 +243,7 @@ fn main() {
     );
 
     let spec = LayerSpec::top_bar("ibde-spike", BAR_H);
-    let (surface, _ls) = app
+    let (_spike_id, surface, _ls) = app
         .session
         .as_mut()
         .unwrap()

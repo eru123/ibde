@@ -3,7 +3,9 @@
 #   docker run --rm -v /apps/ibde:/src:ro ibde-sway-test <cmd...>
 # The client runs with WAYLAND_DISPLAY pointing at the sway socket.
 set -e
-printf "output HEADLESS-1 mode 1280x32\n" > /tmp/sway.conf
+# IBDE_OUTPUT controls the headless output mode (default suits bar spikes)
+MODE="${IBDE_OUTPUT:-1280x32}"
+printf "output HEADLESS-1 mode %s\n" "$MODE" > /tmp/sway.conf
 sway -c /tmp/sway.conf >/tmp/sway.log 2>&1 &
 SWAY_PID=$!
 for i in $(seq 1 30); do

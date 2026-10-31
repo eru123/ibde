@@ -7,4 +7,9 @@ license.workspace = true
 
 [dependencies]
 ibde-ui.workspace = true
-vte = "0.13"
+vte.workspace = true
+portable-pty.workspace = true
+
+[[bin]]
+name = "ibde-terminal"
+path = "src/bin/ibde-terminal.rs"

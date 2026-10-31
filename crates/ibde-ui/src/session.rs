@@ -38,6 +38,12 @@ pub use wayland_client::protocol::wl_shm_pool::WlShmPool;
 pub use wayland_client::protocol::wl_surface;
 pub use wayland_client::protocol::wl_surface::WlSurface;
 pub use wayland_client::{Connection, Dispatch, QueueHandle};
+pub use wayland_protocols::xdg::shell::client::xdg_surface;
+pub use wayland_protocols::xdg::shell::client::xdg_surface::XdgSurface;
+pub use wayland_protocols::xdg::shell::client::xdg_toplevel;
+pub use wayland_protocols::xdg::shell::client::xdg_toplevel::XdgToplevel;
+pub use wayland_protocols::xdg::shell::client::xdg_wm_base;
+pub use wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase;
 pub use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1;
 pub use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Layer;
 pub use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
@@ -55,6 +61,12 @@ pub struct LayerData {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameData {
     pub surface_id: u64,
+}
+
+/// User-data carried by an xdg window (surface + toplevel).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowData {
+    pub id: u64,
 }
 
 /// User-data for the registry (unit).
@@ -75,6 +87,20 @@ pub trait SessionHost {
     fn on_layer_closed(&mut self, id: u64) {
         let _ = id;
     }
+    /// xdg surface configured (ack already sent); toplevel dims arrive
+    /// in `on_toplevel_configure` just before this.
+    fn on_window_configure(&mut self, id: u64) {
+        let _ = id;
+    }
+    /// Toplevel dimensions (0 = pick your own). Precedes
+    /// `on_window_configure`.
+    fn on_toplevel_configure(&mut self, id: u64, width: i32, height: i32) {
+        let _ = (id, width, height);
+    }
+    /// Toplevel closed by the compositor or user.
+    fn on_window_close(&mut self, id: u64) {
+        let _ = id;
+    }
     /// Frame callback for a surface: render, commit, re-request.
     fn on_frame(&mut self, surface_id: u64) {
         let _ = surface_id;
@@ -86,6 +112,7 @@ pub struct Session {
     pub compositor: Option<WlCompositor>,
     pub shm: Option<WlShm>,
     pub layer_shell: Option<ZwlrLayerShellV1>,
+    pub xdg_wm_base: Option<XdgWmBase>,
     next_id: u64,
 }
 
@@ -99,12 +126,14 @@ impl Session {
             + Dispatch<WlCompositor, ()>
             + Dispatch<WlShm, ()>
             + Dispatch<ZwlrLayerShellV1, ()>
+            + Dispatch<XdgWmBase, ()>
             + 'static,
     {
         *state.session_slot() = Some(Session {
             compositor: None,
             shm: None,
             layer_shell: None,
+            xdg_wm_base: None,
             next_id: 0,
         });
         let _registry = conn.display().get_registry(qh, RegistryData);
@@ -125,7 +154,7 @@ impl Session {
         &mut self,
         spec: &LayerSpec,
         qh: &QueueHandle<D>,
-    ) -> Option<(WlSurface, ZwlrLayerSurfaceV1)>
+    ) -> Option<(u64, WlSurface, ZwlrLayerSurfaceV1)>
     where
         D: Dispatch<WlSurface, ()>
             + Dispatch<WlOutput, ()>
@@ -150,7 +179,48 @@ impl Session {
             ls.set_exclusive_zone(spec.exclusive_zone);
         }
         surface.commit();
-        Some((surface, ls))
+        Some((_id, surface, ls))
+    }
+
+    /// Create an xdg toplevel window per `spec` and commit it; the
+    /// toplevel configure (dims) and xdg configure (ack + ready)
+    /// arrive asynchronously.
+    pub fn create_toplevel<D>(
+        &mut self,
+        spec: &WindowSpec,
+        qh: &QueueHandle<D>,
+    ) -> Option<(u64, WlSurface, XdgSurface, XdgToplevel)>
+    where
+        D: Dispatch<WlSurface, ()>
+            + Dispatch<XdgSurface, WindowData>
+            + Dispatch<XdgToplevel, WindowData>
+            + 'static,
+    {
+        let id = self.next_surface_id();
+        let compositor = self.compositor.as_ref()?;
+        let wm = self.xdg_wm_base.as_ref()?;
+        let surface = compositor.create_surface(qh, ());
+        let xds = wm.get_xdg_surface(&surface, qh, WindowData { id });
+        let tl = xds.get_toplevel(qh, WindowData { id });
+        tl.set_title(spec.title.clone());
+        surface.commit();
+        Some((id, surface, xds, tl))
+    }
+}
+
+/// Declarative xdg-window specification.
+pub struct WindowSpec {
+    pub title: String,
+    /// Preferred size in px; None lets the app choose on configure.
+    pub size: Option<(i32, i32)>,
+}
+
+impl WindowSpec {
+    pub fn titled(title: &str) -> Self {
+        WindowSpec {
+            title: title.to_string(),
+            size: None,
+        }
     }
 }
 
@@ -199,6 +269,7 @@ pub fn handle_registry_global<D>(
         + Dispatch<WlCompositor, ()>
         + Dispatch<WlShm, ()>
         + Dispatch<ZwlrLayerShellV1, ()>
+        + Dispatch<XdgWmBase, ()>
         + 'static,
 {
     let was_ready = state.session_slot().as_ref().is_some_and(|s| s.ready());
@@ -210,6 +281,9 @@ pub fn handle_registry_global<D>(
             "wl_shm" => session.shm = Some(registry.bind(name, version.min(1), qh, ())),
             "zwlr_layer_shell_v1" => {
                 session.layer_shell = Some(registry.bind(name, version.min(4), qh, ()))
+            }
+            "xdg_wm_base" => {
+                session.xdg_wm_base = Some(registry.bind(name, version.min(1), qh, ()))
             }
             _ => {}
         }
@@ -329,6 +403,63 @@ macro_rules! delegate_ibde_session {
                 _qh: &$crate::session::QueueHandle<Self>,
             ) {
                 state.on_frame(data.surface_id);
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::XdgWmBase, ()> for $app {
+            fn event(
+                state: &mut Self,
+                wm: &$crate::session::XdgWmBase,
+                event: $crate::session::xdg_wm_base::Event,
+                _data: &(),
+                _conn: &$crate::session::Connection,
+                _qh: &$crate::session::QueueHandle<Self>,
+            ) {
+                if let $crate::session::xdg_wm_base::Event::Ping { serial } = event {
+                    wm.pong(serial);
+                    let _ = state;
+                }
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::XdgSurface, $crate::session::WindowData>
+            for $app
+        {
+            fn event(
+                state: &mut Self,
+                xds: &$crate::session::XdgSurface,
+                event: $crate::session::xdg_surface::Event,
+                data: &$crate::session::WindowData,
+                _conn: &$crate::session::Connection,
+                _qh: &$crate::session::QueueHandle<Self>,
+            ) {
+                if let $crate::session::xdg_surface::Event::Configure { serial } = event {
+                    xds.ack_configure(serial);
+                    state.on_window_configure(data.id);
+                }
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::XdgToplevel, $crate::session::WindowData>
+            for $app
+        {
+            fn event(
+                state: &mut Self,
+                _tl: &$crate::session::XdgToplevel,
+                event: $crate::session::xdg_toplevel::Event,
+                data: &$crate::session::WindowData,
+                _conn: &$crate::session::Connection,
+                _qh: &$crate::session::QueueHandle<Self>,
+            ) {
+                match event {
+                    $crate::session::xdg_toplevel::Event::Configure { width, height, .. } => {
+                        state.on_toplevel_configure(data.id, width, height);
+                    }
+                    $crate::session::xdg_toplevel::Event::Close => {
+                        state.on_window_close(data.id);
+                    }
+                    _ => {}
+                }
             }
         }
 
