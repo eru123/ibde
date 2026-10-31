@@ -1,11 +1,13 @@
 //! ibde-shell — the IBDE shell process (ADR-0005: one process, modules).
 //!
-//! v0 module: the menubar (layer-shell top bar). Draws the light theme
-//! per docs/UX-SPEC.md: translucent bar, graphite accent pill with the
-//! IBDE menu, clock at far right. Redraws on a 1 Hz tick — an idle bar
-//! repaints nothing (ADR-0002: zero-pixel idle repaint).
+//! Modules (v0):
+//! - **menubar** — layer-shell top bar, 1 Hz clock redraw, zero paints
+//!   between ticks (UX-SPEC §2, ADR-0002 idle discipline)
+//! - **dock** — floating layer-shell panel centered on the bottom edge:
+//!   translucent tray, default pins (Files / Terminal / Settings),
+//!   separator, trash; draws once, repaints only on change
 //!
-//! Layout (left→right): [IBDE] menu pill · module area · ... clock
+//! Layout: [IBDE] pill · app area · ... clock  /  bottom: dock tray
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -16,6 +18,8 @@ use ibde_ui::shm::ShmBuffer;
 use ibde_ui::stats::{rss_kb, FpsCounter};
 
 const BAR_H: i32 = 28;
+const DOCK_H: i32 = 60;
+const DOCK_GAP: i32 = 10;
 
 /// Light-theme palette (UX-SPEC §1: Light default, graphite accent).
 mod theme {
@@ -25,16 +29,39 @@ mod theme {
     pub const TEXT: (f64, f64, f64, f64) = (0.11, 0.11, 0.13, 1.0);
     pub const TEXT_MUTED: (f64, f64, f64, f64) = (0.45, 0.45, 0.49, 1.0);
     pub const ON_ACCENT: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 1.0);
+    pub const DOCK_BG: (f64, f64, f64, f64) = (0.961, 0.961, 0.973, 0.88);
+    pub const DOCK_FILES: (f64, f64, f64, f64) = (0.20, 0.42, 0.80, 1.0);
+    pub const DOCK_TERM: (f64, f64, f64, f64) = (0.13, 0.13, 0.15, 1.0);
+    pub const DOCK_SETTINGS: (f64, f64, f64, f64) = (0.49, 0.51, 0.55, 1.0);
+    pub const DOCK_TRASH: (f64, f64, f64, f64) = (0.78, 0.78, 0.80, 1.0);
+}
+
+/// Buffers for one module surface, created at configure time.
+struct Kit {
+    buf: ShmBuffer,
+    canvas: Canvas,
+    drawn: u32,
+}
+
+/// One shell module: identity + surface before configure, kit after.
+struct Module {
+    id: u64,
+    surface: WlSurface,
+    kit: Option<Kit>,
+}
+
+impl Module {
+    fn configured(&self) -> bool {
+        self.kit.is_some()
+    }
 }
 
 struct App {
     session: Option<Session>,
     conn: Option<Connection>,
     qh: Option<QueueHandle<Self>>,
-    surface: Option<WlSurface>,
-    buf: Option<ShmBuffer>,
-    canvas: Option<Canvas>,
-    configured: bool,
+    bar: Option<Module>,
+    dock: Option<Module>,
     frames: u32,
     fps: FpsCounter,
     t0: Option<Instant>,
@@ -46,35 +73,45 @@ impl App {
             session: None,
             conn: None,
             qh: None,
-            surface: None,
-            buf: None,
-            canvas: None,
-            configured: false,
+            bar: None,
+            dock: None,
             frames: 0,
             fps: FpsCounter::new(),
             t0: None,
         }
     }
 
-    fn draw_bar(&mut self) {
-        let Some(c) = self.canvas.as_mut() else {
-            return;
-        };
-        {
-            let cr = c.context().unwrap();
-            draw_bar_content(&cr, c.width, c.height);
-        } // cairo Context must drop before surface data access
-        if let Some(b) = self.buf.as_mut() {
-            c.copy_to(b);
+    fn module_mut(&mut self, id: u64) -> Option<&mut Module> {
+        if self.bar.as_ref().is_some_and(|m| m.id == id) {
+            self.bar.as_mut()
+        } else if self.dock.as_ref().is_some_and(|m| m.id == id) {
+            self.dock.as_mut()
+        } else {
+            None
         }
     }
 
-    fn submit(&mut self) {
-        if let (Some(b), Some(sf)) = (&self.buf, &self.surface) {
-            sf.attach(Some(b.wayland_buffer()), 0, 0);
-            sf.damage_buffer(0, 0, b.width, b.height);
-            sf.commit();
+    /// Render + commit one module; `f` draws onto a fresh-cleared context.
+    fn render_module<F: FnOnce(&cairo::Context, i32, i32)>(&mut self, id: u64, f: F) {
+        let Some(m) = self.module_mut(id) else { return };
+        let Some(k) = m.kit.as_mut() else { return };
+        {
+            let cr = k.canvas.context().unwrap();
+            f(&cr, k.canvas.width, k.canvas.height);
+        } // cairo Context must drop before surface data access
+        k.canvas.copy_to(&mut k.buf);
+        m.surface.attach(Some(k.buf.wayland_buffer()), 0, 0);
+        m.surface.damage_buffer(0, 0, k.buf.width, k.buf.height);
+        m.surface.commit();
+        k.drawn += 1;
+        if let Some(conn) = &self.conn {
+            let _ = conn.flush();
         }
+    }
+
+    fn draw_bar(&mut self) {
+        let id = self.bar.as_ref().map(|m| m.id).unwrap_or(0);
+        self.render_module(id, |cr, w, h| draw_bar_content(cr, w, h));
     }
 }
 
@@ -83,28 +120,39 @@ impl SessionHost for App {
         &mut self.session
     }
 
-    fn on_layer_configure(&mut self, _id: u64, w: i32, h: i32) {
-        let w = if w > 0 { w } else { 1280 };
-        let h = if h > 0 { h } else { BAR_H };
+    fn on_layer_configure(&mut self, id: u64, w: i32, h: i32) {
         let shm = self
             .session
             .as_ref()
             .and_then(|s| s.shm.clone())
             .expect("configure without shm");
         let qh = self.qh.clone().expect("configure without qh");
-        self.buf = Some(ShmBuffer::new(&shm, w, h, &qh));
-        self.canvas = Some(Canvas::new(w, h).expect("canvas"));
-        self.t0.get_or_insert_with(Instant::now);
-        self.draw_bar();
-        self.submit();
-        if let Some(conn) = &self.conn {
-            let _ = conn.flush();
+        let is_bar = self.bar.as_ref().is_some_and(|b| b.id == id);
+        let is_known = is_bar || self.dock.as_ref().is_some_and(|d| d.id == id);
+        if !is_known {
+            eprintln!("[shell] configure for unknown surface {id}");
+            return;
         }
-        self.configured = true;
+        let w = if w > 0 { w } else { 1280 };
+        let h = if h > 0 { h } else { BAR_H };
+        let kit = Kit {
+            buf: ShmBuffer::new(&shm, w, h, &qh),
+            canvas: Canvas::new(w, h).expect("canvas"),
+            drawn: 0,
+        };
+        let Some(m) = self.module_mut(id) else { return };
+        m.kit = Some(kit);
+        self.t0.get_or_insert_with(Instant::now);
+        if is_bar {
+            self.draw_bar();
+        } else {
+            let id2 = id;
+            self.render_module(id2, |cr, w, h| draw_dock_content(cr, w, h));
+        }
     }
 
-    fn on_layer_closed(&mut self, _id: u64) {
-        eprintln!("[shell] layer closed");
+    fn on_layer_closed(&mut self, id: u64) {
+        eprintln!("[shell] layer {id} closed");
     }
 }
 
@@ -118,7 +166,6 @@ fn draw_bar_content(cr: &cairo::Context, width: i32, height: i32) {
     let _ = cr.paint();
     cr.set_operator(cairo::Operator::Over);
 
-    // bar background + bottom hairline
     let (r, g, b, a) = theme::BAR_BG;
     cr.set_source_rgba(r, g, b, a);
     cr.rectangle(0.0, 0.0, w, h);
@@ -185,6 +232,77 @@ fn draw_bar_content(cr: &cairo::Context, width: i32, height: i32) {
     );
 }
 
+/// One dock item: glyph + tile color.
+struct DockItem {
+    glyph: &'static str,
+    color: (f64, f64, f64, f64),
+}
+
+/// Draw the dock tray (pure).
+fn draw_dock_content(cr: &cairo::Context, width: i32, height: i32) {
+    let w = width as f64;
+    let h = height as f64;
+    cr.set_operator(cairo::Operator::Clear);
+    let _ = cr.paint();
+    cr.set_operator(cairo::Operator::Over);
+
+    // tray
+    canvas::fill_rounded_rect(cr, 0.0, 0.0, w, h, 14.0, theme::DOCK_BG);
+
+    let items = [
+        DockItem {
+            glyph: "F",
+            color: theme::DOCK_FILES,
+        },
+        DockItem {
+            glyph: ">_",
+            color: theme::DOCK_TERM,
+        },
+        DockItem {
+            glyph: "S",
+            color: theme::DOCK_SETTINGS,
+        },
+        DockItem {
+            glyph: "\u{232b}",
+            color: theme::DOCK_TRASH,
+        }, // ⌫ trash
+    ];
+
+    let icon = 42.0;
+    let gap = 10.0;
+    let pad = 9.0;
+    let sep_at = 3; // separator before the trash
+    let sep_space = 1.0 + 2.0 * 7.0; // 1px line with 7px gaps each side
+
+    let font = {
+        let mut f = pango::FontDescription::from_string("Sans 13");
+        f.set_weight(pango::Weight::Bold);
+        f
+    };
+
+    let mut x = pad;
+    for (i, it) in items.iter().enumerate() {
+        let y = (h - icon) / 2.0;
+        canvas::fill_rounded_rect(cr, x, y, icon, icon, 10.0, it.color);
+        let (gw, gh) = canvas::label_size(cr, it.glyph, &font);
+        canvas::draw_label(
+            cr,
+            it.glyph,
+            &font,
+            x + (icon - gw as f64) / 2.0,
+            y + (icon - gh as f64) / 2.0,
+            theme::ON_ACCENT,
+        );
+        x += icon + gap;
+        if i + 1 == sep_at {
+            cr.set_source_rgba(0.72, 0.72, 0.75, 0.9);
+            cr.rectangle(x + 6.0, 8.0, 1.0, h - 16.0);
+            let _ = cr.fill();
+            x += sep_space;
+        }
+    }
+}
+
 /// Local HH:MM via libc localtime_r (no chrono dependency; same tzdata
 /// as every other process on the machine).
 fn clock_hm() -> String {
@@ -198,6 +316,16 @@ fn clock_hm() -> String {
         }
         format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
     }
+}
+
+/// Dock tray width for the current item set (must match draw_dock_content).
+fn dock_width() -> i32 {
+    let items = 4;
+    let icon = 42.0;
+    let gap = 10.0;
+    let pad = 9.0;
+    let sep_space = 15.0;
+    (pad * 2.0 + items as f64 * icon + (items as f64 - 1.0) * gap + sep_space) as i32
 }
 
 fn main() {
@@ -224,17 +352,41 @@ fn main() {
         "missing globals (need a wlroots compositor with layer-shell)"
     );
 
-    let spec = LayerSpec::top_bar("ibde-bar", BAR_H);
-    let (_bar_id, surface, _ls) = app
+    // module: menubar (full-width top bar)
+    let bar_spec = LayerSpec::top_bar("ibde-bar", BAR_H);
+    let (bar_id, bar_surface, _ls) = app
         .session
         .as_mut()
         .unwrap()
-        .create_layer(&spec, &qh)
+        .create_layer(&bar_spec, &qh)
         .expect("layer shell unavailable");
-    app.surface = Some(surface);
+    app.bar = Some(Module {
+        id: bar_id,
+        surface: bar_surface,
+        kit: None,
+    });
+
+    // module: dock (floating, bottom-center, margin below)
+    let dock_spec = LayerSpec::bottom_dock("ibde-dock", dock_width(), DOCK_H, DOCK_GAP);
+    let (dock_id, dock_surface, _ls) = app
+        .session
+        .as_mut()
+        .unwrap()
+        .create_layer(&dock_spec, &qh)
+        .expect("layer shell unavailable");
+    app.dock = Some(Module {
+        id: dock_id,
+        surface: dock_surface,
+        kit: None,
+    });
+
     let _ = conn.flush();
-    queue.roundtrip(&mut app).expect("no bar configure");
-    assert!(app.configured, "bar never configured");
+    queue.roundtrip(&mut app).expect("no configure arrived");
+    assert!(
+        app.bar.as_ref().is_some_and(|m| m.configured())
+            && app.dock.as_ref().is_some_and(|m| m.configured()),
+        "bar/dock never configured"
+    );
 
     // 1 Hz tick: clock redraws once per second, nothing else repaints
     let (tx, rx) = mpsc::channel::<()>();
@@ -253,11 +405,7 @@ fn main() {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 app.frames += 1;
-                app.draw_bar();
-                app.submit();
-                if let Some(conn) = &app.conn {
-                    let _ = conn.flush();
-                }
+                app.draw_bar(); // only the bar ticks; the dock is static
                 if let Some((fps, elapsed)) = app.fps.tick() {
                     println!(
                         "STATS redraws_per_s={fps} rss_kb={} t={elapsed:.1}",
@@ -276,5 +424,16 @@ fn main() {
         }
     }
 
-    println!("SUMMARY seconds={seconds} rss_kb={}", rss_kb());
+    println!(
+        "SUMMARY seconds={seconds} rss_kb={} bar_draws={} dock_draws={}",
+        rss_kb(),
+        app.bar
+            .as_ref()
+            .map(|m| m.kit.as_ref().map(|k| k.drawn).unwrap_or(0))
+            .unwrap_or(0),
+        app.dock
+            .as_ref()
+            .map(|m| m.kit.as_ref().map(|k| k.drawn).unwrap_or(0))
+            .unwrap_or(0),
+    );
 }

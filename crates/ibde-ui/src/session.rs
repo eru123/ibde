@@ -213,6 +213,12 @@ impl Session {
         );
         ls.set_anchor(spec.anchors);
         ls.set_size(spec.width, spec.height);
+        ls.set_margin(
+            spec.margins.0,
+            spec.margins.1,
+            spec.margins.2,
+            spec.margins.3,
+        );
         if spec.exclusive_zone != 0 {
             ls.set_exclusive_zone(spec.exclusive_zone);
         }
@@ -270,6 +276,8 @@ pub struct LayerSpec {
     pub width: u32,
     pub height: u32,
     pub exclusive_zone: i32,
+    /// (left, right, top, bottom) margins from the anchored edges.
+    pub margins: (i32, i32, i32, i32),
 }
 
 impl LayerSpec {
@@ -282,6 +290,21 @@ impl LayerSpec {
             width: 0, // derived from anchors
             height: height as u32,
             exclusive_zone: height,
+            margins: (0, 0, 0, 0),
+        }
+    }
+
+    /// Floating panel centered on the bottom edge (dock-style):
+    /// explicit size, bottom margin, no exclusive zone (overlay).
+    pub fn bottom_dock(namespace: &str, width: i32, height: i32, gap: i32) -> Self {
+        LayerSpec {
+            namespace: namespace.to_string(),
+            layer: Layer::Top,
+            anchors: Anchor::Bottom,
+            width: width as u32,
+            height: height as u32,
+            exclusive_zone: 0,
+            margins: (0, 0, 0, gap),
         }
     }
 }

@@ -73,6 +73,34 @@ pub fn draw_label(
     (w, h)
 }
 
+/// Fill a rounded rectangle (corner radius clamped to half-extents).
+pub fn fill_rounded_rect(
+    cr: &cairo::Context,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    radius: f64,
+    rgba: (f64, f64, f64, f64),
+) {
+    use std::f64::consts::FRAC_PI_2;
+    let r = radius.min(w / 2.0).min(h / 2.0);
+    cr.set_source_rgba(rgba.0, rgba.1, rgba.2, rgba.3);
+    cr.new_path();
+    cr.arc(x + w - r, y + r, r, -FRAC_PI_2, 0.0);
+    cr.arc(x + w - r, y + h - r, r, 0.0, FRAC_PI_2);
+    cr.arc(x + r, y + h - r, r, FRAC_PI_2, std::f64::consts::PI);
+    cr.arc(
+        x + r,
+        y + r,
+        r,
+        std::f64::consts::PI,
+        1.5 * std::f64::consts::PI,
+    );
+    cr.close_path();
+    let _ = cr.fill();
+}
+
 /// Fill a rounded "pill" (fully-rounded end caps).
 pub fn fill_pill(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, rgba: (f64, f64, f64, f64)) {
     let r = h / 2.0;
@@ -99,6 +127,26 @@ pub fn fill_pill(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, rgba: (f64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rounded_rect_corners_clamp_and_cover() {
+        let mut c = Canvas::new(40, 40).unwrap();
+        {
+            let cr = c.context().unwrap();
+            fill_rounded_rect(&cr, 4.0, 4.0, 32.0, 32.0, 10.0, (0.2, 0.4, 0.6, 1.0));
+        }
+        let d = c.surface_mut().data().unwrap();
+        let px = |x: usize, y: usize| -> (u8, u8, u8) {
+            let i = (y * 40 * 4) + x * 4;
+            (d[i + 2], d[i + 1], d[i]) // ARGB → RGB
+        };
+        // center covered
+        assert_eq!(px(20, 20), (51, 102, 153));
+        // outside the corner radius (top-left corner) untouched
+        assert_eq!(px(5, 5), (0, 0, 0));
+        // edge midpoint covered (straight section)
+        assert_eq!(px(20, 5), (51, 102, 153));
+    }
 
     /// Frames must be deterministic: same input state → identical bytes
     /// (foundation of the render-hash golden tests, ADR-0004).
