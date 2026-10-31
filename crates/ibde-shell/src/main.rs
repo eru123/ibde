@@ -111,7 +111,7 @@ impl App {
 
     fn draw_bar(&mut self) {
         let id = self.bar.as_ref().map(|m| m.id).unwrap_or(0);
-        self.render_module(id, |cr, w, h| draw_bar_content(cr, w, h));
+        self.render_module(id, draw_bar_content);
     }
 }
 
@@ -147,7 +147,7 @@ impl SessionHost for App {
             self.draw_bar();
         } else {
             let id2 = id;
-            self.render_module(id2, |cr, w, h| draw_dock_content(cr, w, h));
+            self.render_module(id2, draw_dock_content);
         }
     }
 
