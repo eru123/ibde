@@ -42,6 +42,12 @@ write_files:
       free -m
       echo "--- per-process RSS KiB (top 30) ---"
       ps -eo rss,comm --sort=-rss --no-headers | head -30
+      echo "--- PSS KiB (smaps_rollup, top 20) ---"
+      for p in /proc/[0-9]*; do
+        comm=$(cat "$p/comm" 2>/dev/null) || continue
+        pss=$(awk '/^Pss:/ {print $2}' "$p/smaps_rollup" 2>/dev/null) || continue
+        [ -n "$pss" ] && echo "$pss $comm"
+      done | sort -rn | head -20
       echo "--- session process count ---"
       ps -e --no-headers | wc -l
       echo "=== end ==="
@@ -51,6 +57,7 @@ runcmd:
   # Debian's seatd grants seat access via the video group (there is no
   # 'seatd' group); DRM nodes are video-group too.
   - usermod -aG video debian
+  - systemctl disable --now unattended-upgrades || true
   - systemctl enable --now seatd
   - mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
   - |
