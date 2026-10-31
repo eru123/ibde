@@ -1,0 +1,10 @@
+[package]
+name = "ibde-terminal"
+description = "IBDE flagship terminal — emulation core: vte parser feeding ibde-ui's TextGrid (ADR-0011)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ibde-ui.workspace = true
+vte = "0.13"

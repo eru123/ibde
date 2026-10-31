@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ibde-ui",
+    "crates/ibde-terminal",
     "ui/spike-rs",
 ]
 
@@ -20,6 +21,7 @@ pango = "0.20"
 pangocairo = "0.20"
 memmap2 = "0.9"
 libc = "0.2"
+vte = "0.13"
 
 [profile.release]
 lto = "thin"

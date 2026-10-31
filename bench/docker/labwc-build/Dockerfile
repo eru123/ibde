@@ -15,7 +15,7 @@ RUN printf 'deb-src http://deb.debian.org/debian trixie main\n' \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 # build once at image build time to prove the toolchain
-RUN cd /labwc-* && meson setup build \
-    -Dxwayland=disabled -Dlto=disabled \
+RUN cd /labwc-* \
+    && meson setup build -Dxwayland=disabled \
     && ninja -C build \
     && ./build/labwc --version
