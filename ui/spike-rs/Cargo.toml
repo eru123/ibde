@@ -3,12 +3,10 @@ name = "ibde-spike"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "IBDE Phase 0 spike, Rust edition (ADR-0012) — mirrors ui/spike/spike.c, now dogfooding ibde-ui"
+description = "IBDE Phase 0 spike, Rust edition — now a pure ibde-ui consumer (session glue validation)"
 
 [dependencies]
 ibde-ui.workspace = true
-wayland-client.workspace = true
-wayland-protocols-wlr.workspace = true
 cairo-rs.workspace = true
 pango.workspace = true
 pangocairo.workspace = true

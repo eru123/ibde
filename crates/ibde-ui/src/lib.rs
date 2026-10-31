@@ -15,5 +15,6 @@
 pub mod atlas;
 pub mod canvas;
 pub mod grid;
+pub mod session;
 pub mod shm;
 pub mod stats;

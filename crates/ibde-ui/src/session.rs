@@ -1,0 +1,402 @@
+//! Session glue: connection + globals + layer surfaces, routed to the
+//! app's state via [`SessionHost`] (ADR-0005's "shell as layer-shell
+//! clients" made turnkey).
+//!
+//! Apps bring one trait impl and one macro invocation:
+//!
+//! ```ignore
+//! struct App { session: Option<ibde_ui::session::Session>, /* … */ }
+//! impl ibde_ui::session::SessionHost for App {
+//!     fn session_slot(&mut self) -> &mut Option<Session> { &mut self.session }
+//!     fn on_layer_configure(&mut self, id: u64, w: i32, h: i32) { /* size buffers */ }
+//!     fn on_frame(&mut self, surface_id: u64) { /* render, commit, re-request */ }
+//! }
+//! ibde_ui::delegate_ibde_session!(App);
+//! ```
+//!
+//! The macro generates the `wayland_client::Dispatch` impls in the app's
+//! crate (orphan-rule compliant — same pattern as wayland-client's own
+//! `delegate_noop!`). This API is a v0 draft contract; freezing it is a
+//! Phase 1 exit criterion (`docs/contracts/`).
+
+// Public re-exports: everything the delegate macro references lives
+// under $crate::session so its expansion is path-hygienic.
+pub use wayland_client::protocol::wl_buffer;
+pub use wayland_client::protocol::wl_buffer::WlBuffer;
+pub use wayland_client::protocol::wl_callback;
+pub use wayland_client::protocol::wl_callback::WlCallback;
+pub use wayland_client::protocol::wl_compositor;
+pub use wayland_client::protocol::wl_compositor::WlCompositor;
+pub use wayland_client::protocol::wl_output;
+pub use wayland_client::protocol::wl_output::WlOutput;
+pub use wayland_client::protocol::wl_registry;
+pub use wayland_client::protocol::wl_registry::WlRegistry;
+pub use wayland_client::protocol::wl_shm;
+pub use wayland_client::protocol::wl_shm::WlShm;
+pub use wayland_client::protocol::wl_shm_pool;
+pub use wayland_client::protocol::wl_shm_pool::WlShmPool;
+pub use wayland_client::protocol::wl_surface;
+pub use wayland_client::protocol::wl_surface::WlSurface;
+pub use wayland_client::{Connection, Dispatch, QueueHandle};
+pub use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1;
+pub use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Layer;
+pub use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
+pub use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
+pub use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Anchor;
+pub use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1;
+
+/// User-data carried by a layer surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerData {
+    pub id: u64,
+}
+
+/// User-data carried by a frame callback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameData {
+    pub surface_id: u64,
+}
+
+/// User-data for the registry (unit).
+#[derive(Clone, Copy, Debug)]
+pub struct RegistryData;
+
+/// Everything the host app must provide; the callbacks are optional.
+pub trait SessionHost {
+    /// Storage for the session. `Session::begin` fills it.
+    fn session_slot(&mut self) -> &mut Option<Session>;
+    /// Fired once, when compositor + shm are both bound.
+    fn on_ready(&mut self) {}
+    /// Layer surface configured (ack already sent). Create/size buffers.
+    fn on_layer_configure(&mut self, id: u64, width: i32, height: i32) {
+        let _ = (id, width, height);
+    }
+    /// Layer surface closed by the compositor.
+    fn on_layer_closed(&mut self, id: u64) {
+        let _ = id;
+    }
+    /// Frame callback for a surface: render, commit, re-request.
+    fn on_frame(&mut self, surface_id: u64) {
+        let _ = surface_id;
+    }
+}
+
+/// Bound globals + surface-id allocator.
+pub struct Session {
+    pub compositor: Option<WlCompositor>,
+    pub shm: Option<WlShm>,
+    pub layer_shell: Option<ZwlrLayerShellV1>,
+    next_id: u64,
+}
+
+impl Session {
+    /// Create the session slot and the registry. Follow with one
+    /// `queue.roundtrip(&mut app)` — globals land during it.
+    pub fn begin<D>(state: &mut D, conn: &Connection, qh: &QueueHandle<D>)
+    where
+        D: SessionHost
+            + Dispatch<WlRegistry, RegistryData>
+            + Dispatch<WlCompositor, ()>
+            + Dispatch<WlShm, ()>
+            + Dispatch<ZwlrLayerShellV1, ()>
+            + 'static,
+    {
+        *state.session_slot() = Some(Session {
+            compositor: None,
+            shm: None,
+            layer_shell: None,
+            next_id: 0,
+        });
+        let _registry = conn.display().get_registry(qh, RegistryData);
+    }
+
+    pub fn next_surface_id(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    pub fn ready(&self) -> bool {
+        self.compositor.is_some() && self.shm.is_some()
+    }
+
+    /// Create a layer surface per `spec` and commit it; the configure
+    /// arrives asynchronously in `on_layer_configure`.
+    pub fn create_layer<D>(
+        &mut self,
+        spec: &LayerSpec,
+        qh: &QueueHandle<D>,
+    ) -> Option<(WlSurface, ZwlrLayerSurfaceV1)>
+    where
+        D: Dispatch<WlSurface, ()>
+            + Dispatch<WlOutput, ()>
+            + Dispatch<ZwlrLayerSurfaceV1, LayerData>
+            + 'static,
+    {
+        let _id = self.next_surface_id();
+        let compositor = self.compositor.as_ref()?;
+        let shell = self.layer_shell.as_ref()?;
+        let surface = compositor.create_surface(qh, ());
+        let ls = shell.get_layer_surface(
+            &surface,
+            None::<&WlOutput>,
+            spec.layer,
+            spec.namespace.clone(),
+            qh,
+            LayerData { id: _id },
+        );
+        ls.set_anchor(spec.anchors);
+        ls.set_size(spec.width, spec.height);
+        if spec.exclusive_zone != 0 {
+            ls.set_exclusive_zone(spec.exclusive_zone);
+        }
+        surface.commit();
+        Some((surface, ls))
+    }
+}
+
+/// Declarative layer-surface specification.
+pub struct LayerSpec {
+    pub namespace: String,
+    pub layer: Layer,
+    pub anchors: Anchor,
+    pub width: u32,
+    pub height: u32,
+    pub exclusive_zone: i32,
+}
+
+impl LayerSpec {
+    /// Full-width top bar of `height` px (menubar-style).
+    pub fn top_bar(namespace: &str, height: i32) -> Self {
+        LayerSpec {
+            namespace: namespace.to_string(),
+            layer: Layer::Top,
+            anchors: Anchor::Top | Anchor::Left | Anchor::Right,
+            width: 0, // derived from anchors
+            height: height as u32,
+            exclusive_zone: height,
+        }
+    }
+}
+
+/// Request the next frame callback for a surface.
+pub fn request_frame<D>(surface: &WlSurface, surface_id: u64, qh: &QueueHandle<D>)
+where
+    D: Dispatch<WlCallback, FrameData> + 'static,
+{
+    let _cb = surface.frame(qh, FrameData { surface_id });
+}
+
+/// Registry-event handler used by the delegate macro.
+pub fn handle_registry_global<D>(
+    state: &mut D,
+    registry: &WlRegistry,
+    name: u32,
+    interface: String,
+    version: u32,
+    qh: &QueueHandle<D>,
+) where
+    D: SessionHost
+        + Dispatch<WlCompositor, ()>
+        + Dispatch<WlShm, ()>
+        + Dispatch<ZwlrLayerShellV1, ()>
+        + 'static,
+{
+    let was_ready = state.session_slot().as_ref().is_some_and(|s| s.ready());
+    if let Some(session) = state.session_slot().as_mut() {
+        match interface.as_str() {
+            "wl_compositor" => {
+                session.compositor = Some(registry.bind(name, version.min(4), qh, ()))
+            }
+            "wl_shm" => session.shm = Some(registry.bind(name, version.min(1), qh, ())),
+            "zwlr_layer_shell_v1" => {
+                session.layer_shell = Some(registry.bind(name, version.min(4), qh, ()))
+            }
+            _ => {}
+        }
+    }
+    if !was_ready && state.session_slot().as_ref().is_some_and(|s| s.ready()) {
+        state.on_ready();
+    }
+}
+
+/// Generate the `wayland_client::Dispatch` impls that route protocol
+/// events into your [`SessionHost`] implementation. Invoke in the crate
+/// that defines `$app`.
+#[macro_export]
+macro_rules! delegate_ibde_session {
+    ($app:ty) => {
+        impl $crate::session::Dispatch<$crate::session::WlRegistry, $crate::session::RegistryData>
+            for $app
+        {
+            fn event(
+                state: &mut Self,
+                registry: &$crate::session::WlRegistry,
+                event: $crate::session::wl_registry::Event,
+                _data: &$crate::session::RegistryData,
+                _conn: &$crate::session::Connection,
+                qh: &$crate::session::QueueHandle<Self>,
+            ) {
+                if let $crate::session::wl_registry::Event::Global {
+                    name,
+                    interface,
+                    version,
+                } = event
+                {
+                    $crate::session::handle_registry_global::<$app>(
+                        state, registry, name, interface, version, qh,
+                    );
+                }
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::WlCompositor, ()> for $app {
+            fn event(
+                _: &mut Self,
+                _: &$crate::session::WlCompositor,
+                _: $crate::session::wl_compositor::Event,
+                _: &(),
+                _: &$crate::session::Connection,
+                _: &$crate::session::QueueHandle<Self>,
+            ) {
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::WlShm, ()> for $app {
+            fn event(
+                _: &mut Self,
+                _: &$crate::session::WlShm,
+                _: $crate::session::wl_shm::Event,
+                _: &(),
+                _: &$crate::session::Connection,
+                _: &$crate::session::QueueHandle<Self>,
+            ) {
+                // wl_shm format events: ignored by design
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::ZwlrLayerShellV1, ()> for $app {
+            fn event(
+                _: &mut Self,
+                _: &$crate::session::ZwlrLayerShellV1,
+                _: $crate::session::zwlr_layer_shell_v1::Event,
+                _: &(),
+                _: &$crate::session::Connection,
+                _: &$crate::session::QueueHandle<Self>,
+            ) {
+            }
+        }
+
+        impl
+            $crate::session::Dispatch<
+                $crate::session::ZwlrLayerSurfaceV1,
+                $crate::session::LayerData,
+            > for $app
+        {
+            fn event(
+                state: &mut Self,
+                ls: &$crate::session::ZwlrLayerSurfaceV1,
+                event: $crate::session::zwlr_layer_surface_v1::Event,
+                data: &$crate::session::LayerData,
+                _conn: &$crate::session::Connection,
+                _qh: &$crate::session::QueueHandle<Self>,
+            ) {
+                match event {
+                    $crate::session::zwlr_layer_surface_v1::Event::Configure {
+                        serial,
+                        width,
+                        height,
+                    } => {
+                        ls.ack_configure(serial);
+                        state.on_layer_configure(data.id, width as i32, height as i32);
+                    }
+                    $crate::session::zwlr_layer_surface_v1::Event::Closed => {
+                        state.on_layer_closed(data.id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::WlCallback, $crate::session::FrameData>
+            for $app
+        {
+            fn event(
+                state: &mut Self,
+                _cb: &$crate::session::WlCallback,
+                _ev: $crate::session::wl_callback::Event,
+                data: &$crate::session::FrameData,
+                _conn: &$crate::session::Connection,
+                _qh: &$crate::session::QueueHandle<Self>,
+            ) {
+                state.on_frame(data.surface_id);
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::WlShmPool, ()> for $app {
+            fn event(
+                _: &mut Self,
+                _: &$crate::session::WlShmPool,
+                _: $crate::session::wl_shm_pool::Event,
+                _: &(),
+                _: &$crate::session::Connection,
+                _: &$crate::session::QueueHandle<Self>,
+            ) {
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::WlBuffer, ()> for $app {
+            fn event(
+                _: &mut Self,
+                _: &$crate::session::WlBuffer,
+                _: $crate::session::wl_buffer::Event,
+                _: &(),
+                _: &$crate::session::Connection,
+                _: &$crate::session::QueueHandle<Self>,
+            ) {
+                // buffer release: tracked when the shell goes double-buffered
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::WlSurface, ()> for $app {
+            fn event(
+                _: &mut Self,
+                _: &$crate::session::WlSurface,
+                _: $crate::session::wl_surface::Event,
+                _: &(),
+                _: &$crate::session::Connection,
+                _: &$crate::session::QueueHandle<Self>,
+            ) {
+                // enter/leave/preferred-scale: handled with output support
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::WlOutput, ()> for $app {
+            fn event(
+                _: &mut Self,
+                _: &$crate::session::WlOutput,
+                _: $crate::session::wl_output::Event,
+                _: &(),
+                _: &$crate::session::Connection,
+                _: &$crate::session::QueueHandle<Self>,
+            ) {
+            }
+        }
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn top_bar_spec_defaults() {
+        let s = LayerSpec::top_bar("bar", 32);
+        assert_eq!(s.height, 32);
+        assert_eq!(s.exclusive_zone, 32);
+        assert_eq!(s.width, 0); // width comes from Left|Right anchors
+        assert!(s
+            .anchors
+            .contains(Anchor::Top | Anchor::Left | Anchor::Right));
+        assert!(matches!(s.layer, Layer::Top));
+    }
+}

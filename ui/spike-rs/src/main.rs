@@ -1,5 +1,7 @@
-//! IBDE toolkit spike — Rust edition (ADR-0012). Mirrors `ui/spike/spike.c`
-//! and dogfoods the first real `ibde-ui` crate modules (shm, canvas, stats).
+//! IBDE toolkit spike — Rust edition, now built entirely on the
+//! `ibde-ui` session glue (`delegate_ibde_session!` + `SessionHost`).
+//! No direct wayland-client usage — this binary is the glue's
+//! acceptance test.
 //!
 //! Modes:
 //!   ibde-spike                 — layer-shell bar, 10 s
@@ -10,33 +12,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use ibde_ui::canvas::{self, Canvas};
+use ibde_ui::session::{Connection, LayerSpec, QueueHandle, Session, SessionHost, WlSurface};
 use ibde_ui::shm::ShmBuffer;
 use ibde_ui::stats::{rss_kb, FpsCounter};
 use pango::FontDescription;
-use wayland_client::protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface,
-};
-use wayland_client::{Connection, Dispatch, QueueHandle};
-use wayland_protocols_wlr::layer_shell::v1::client::{
-    zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
-    zwlr_layer_surface_v1::{self, Anchor, ZwlrLayerSurfaceV1},
-};
 
 const BAR_H: i32 = 32;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
 struct App {
-    compositor: Option<wl_compositor::WlCompositor>,
-    shm: Option<wl_shm::WlShm>,
-    shell: Option<ZwlrLayerShellV1>,
-    surface: Option<wl_surface::WlSurface>,
+    session: Option<Session>,
+    conn: Option<Connection>,
+    qh: Option<QueueHandle<Self>>,
+    surface: Option<WlSurface>,
+    surface_id: u64,
     buf: Option<ShmBuffer>,
     canvas: Option<Canvas>,
     font: FontDescription,
-    cfg_w: i32,
-    cfg_h: i32,
-    configured: bool,
     frames: u32,
     fps: FpsCounter,
     t0: Option<Instant>,
@@ -46,23 +39,104 @@ struct App {
 impl App {
     fn new(seconds: f64) -> Self {
         Self {
-            compositor: None,
-            shm: None,
-            shell: None,
+            session: None,
+            conn: None,
+            qh: None,
             surface: None,
+            surface_id: 0,
             buf: None,
             canvas: None,
             font: FontDescription::from_string("Sans 12"),
-            cfg_w: 0,
-            cfg_h: 0,
-            configured: false,
             frames: 0,
             fps: FpsCounter::new(),
             t0: None,
             seconds,
         }
     }
+
+    fn render_at(&mut self, t: f64) {
+        let font = self.font.clone();
+        if let (Some(buf), Some(c)) = (&mut self.buf, &mut self.canvas) {
+            draw(c, t, self.frames, &font);
+            c.copy_to(buf);
+        }
+    }
+
+    fn submit(&mut self) {
+        if let (Some(buf), Some(sf)) = (&self.buf, &self.surface) {
+            sf.attach(Some(buf.wayland_buffer()), 0, 0);
+            sf.damage_buffer(0, 0, buf.width, buf.height);
+            sf.commit();
+        }
+    }
 }
+
+impl SessionHost for App {
+    fn session_slot(&mut self) -> &mut Option<Session> {
+        &mut self.session
+    }
+
+    fn on_layer_configure(&mut self, id: u64, w: i32, h: i32) {
+        let w = if w > 0 { w } else { 1280 };
+        let h = if h > 0 { h } else { BAR_H };
+        let shm = self
+            .session
+            .as_ref()
+            .and_then(|s| s.shm.clone())
+            .expect("on_layer_configure without shm");
+        let qh = self.qh.clone().expect("on_layer_configure without qh");
+        self.surface_id = id;
+        self.buf = Some(ShmBuffer::new(&shm, w, h, &qh));
+        self.canvas = Some(Canvas::new(w, h).expect("canvas"));
+        self.t0.get_or_insert_with(Instant::now);
+
+        // initial frame: commit with damage so headless compositors
+        // start delivering frame callbacks
+        self.render_at(0.0);
+        self.submit();
+        if let Some(sf) = &self.surface {
+            ibde_ui::session::request_frame(sf, self.surface_id, &qh);
+            if let Some(conn) = &self.conn {
+                let _ = conn.flush();
+            }
+        }
+    }
+
+    fn on_layer_closed(&mut self, _id: u64) {
+        RUNNING.store(false, Ordering::Relaxed);
+    }
+
+    fn on_frame(&mut self, surface_id: u64) {
+        if surface_id != self.surface_id {
+            return;
+        }
+        let t = match self.t0 {
+            Some(t) => t.elapsed().as_secs_f64(),
+            None => return,
+        };
+        if t >= self.seconds || !RUNNING.load(Ordering::Relaxed) {
+            return;
+        }
+        self.frames += 1;
+
+        self.render_at(t);
+        self.submit();
+
+        if let Some((fps, elapsed)) = self.fps.tick() {
+            println!("STATS fps={fps} rss_kb={} t={elapsed:.1}", rss_kb());
+        }
+
+        let qh = self.qh.clone().unwrap();
+        if let Some(sf) = &self.surface {
+            ibde_ui::session::request_frame(sf, self.surface_id, &qh);
+            if let Some(conn) = &self.conn {
+                let _ = conn.flush();
+            }
+        }
+    }
+}
+
+ibde_ui::delegate_ibde_session!(App);
 
 /// Draw one frame onto the canvas.
 fn draw(c: &Canvas, t: f64, frames: u32, font: &FontDescription) {
@@ -76,7 +150,7 @@ fn draw(c: &Canvas, t: f64, frames: u32, font: &FontDescription) {
     cr.rectangle(0.0, 0.0, c.width as f64, c.height as f64);
     let _ = cr.fill();
 
-    // animated accent pill (ibde-ui helper — dogfooding)
+    // animated accent pill (ibde-ui helper)
     let pulse = 0.80 + 0.20 * (t * 2.0).sin();
     let pw = 180.0 + 40.0 * (t * 1.3).sin();
     canvas::fill_pill(
@@ -90,7 +164,7 @@ fn draw(c: &Canvas, t: f64, frames: u32, font: &FontDescription) {
 
     // text (ibde-ui helper)
     let text = format!(
-        "IBDE spike (rust) {}x{} frame {}",
+        "IBDE spike (session glue) {}x{} frame {}",
         c.width, c.height, frames
     );
     let (_tw, th) = canvas::label_size(&cr, &text, font);
@@ -103,118 +177,6 @@ fn draw(c: &Canvas, t: f64, frames: u32, font: &FontDescription) {
         (0.1, 0.1, 0.12, 1.0),
     );
 }
-
-/// Render + copy canvas into the shm buffer.
-fn render_and_copy(app: &mut App, t: f64) {
-    let font = app.font.clone();
-    if let (Some(buf), Some(c)) = (&mut app.buf, &mut app.canvas) {
-        draw(c, t, app.frames, &font);
-        c.copy_to(buf);
-    }
-}
-
-impl Dispatch<wl_registry::WlRegistry, ()> for App {
-    fn event(
-        state: &mut Self,
-        registry: &wl_registry::WlRegistry,
-        event: wl_registry::Event,
-        _data: &(),
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-    ) {
-        if let wl_registry::Event::Global {
-            name,
-            interface,
-            version,
-        } = event
-        {
-            match interface.as_str() {
-                "wl_compositor" => {
-                    state.compositor = Some(registry.bind(name, version.min(4), qh, ()))
-                }
-                "wl_shm" => state.shm = Some(registry.bind(name, version.min(1), qh, ())),
-                "zwlr_layer_shell_v1" => {
-                    state.shell = Some(registry.bind(name, version.min(4), qh, ()))
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
-    fn event(
-        state: &mut Self,
-        ls: &ZwlrLayerSurfaceV1,
-        event: zwlr_layer_surface_v1::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-        match event {
-            zwlr_layer_surface_v1::Event::Configure {
-                serial,
-                width,
-                height,
-            } => {
-                ls.ack_configure(serial);
-                state.cfg_w = width as i32;
-                state.cfg_h = height as i32;
-                state.configured = true;
-            }
-            zwlr_layer_surface_v1::Event::Closed => {
-                RUNNING.store(false, Ordering::Relaxed);
-            }
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<wl_callback::WlCallback, ()> for App {
-    fn event(
-        state: &mut Self,
-        _proxy: &wl_callback::WlCallback,
-        _event: wl_callback::Event,
-        _data: &(),
-        conn: &Connection,
-        qh: &QueueHandle<Self>,
-    ) {
-        let t0 = match state.t0 {
-            Some(t) => t,
-            None => return,
-        };
-        let t = t0.elapsed().as_secs_f64();
-        if t >= state.seconds || !RUNNING.load(Ordering::Relaxed) {
-            return;
-        }
-        state.frames += 1;
-
-        let surface = state.surface.clone().unwrap();
-        render_and_copy(state, t);
-
-        if let Some(buf) = &state.buf {
-            surface.attach(Some(buf.wayland_buffer()), 0, 0);
-            surface.damage_buffer(0, 0, buf.width, buf.height);
-        }
-        surface.commit();
-
-        if let Some((fps, elapsed)) = state.fps.tick() {
-            println!("STATS fps={fps} rss_kb={} t={elapsed:.1}", rss_kb());
-        }
-
-        let _cb = surface.frame(qh, ());
-        surface.commit();
-        let _ = conn.flush();
-    }
-}
-
-wayland_client::delegate_noop!(App: wl_compositor::WlCompositor);
-wayland_client::delegate_noop!(App: ignore wl_shm::WlShm); // emits format events
-wayland_client::delegate_noop!(App: wl_shm_pool::WlShmPool);
-wayland_client::delegate_noop!(App: ignore wl_buffer::WlBuffer); // release
-wayland_client::delegate_noop!(App: ignore wl_surface::WlSurface); // enter/leave
-wayland_client::delegate_noop!(App: ignore wl_output::WlOutput);
-wayland_client::delegate_noop!(App: ZwlrLayerShellV1);
 
 fn run_offscreen(frames: u32) {
     let c = Canvas::new(1280, BAR_H).unwrap();
@@ -265,67 +227,32 @@ fn main() {
         return;
     }
 
-    let conn = Connection::connect_to_env()
-        .expect("cannot connect to a Wayland compositor (WAYLAND_DISPLAY set?)");
+    let conn = Connection::connect_to_env().expect("cannot connect to a Wayland compositor");
     let mut queue = conn.new_event_queue();
     let qh = queue.handle();
-    let display = conn.display();
-    let _registry = display.get_registry(&qh, ());
 
     let mut app = App::new(seconds);
+    app.conn = Some(conn.clone());
+    app.qh = Some(qh.clone());
+
+    Session::begin(&mut app, &conn, &qh);
     queue.roundtrip(&mut app).expect("roundtrip failed");
-    eprintln!(
-        "[spike] globals: compositor={} shm={} shell={}",
-        app.compositor.is_some(),
-        app.shm.is_some(),
-        app.shell.is_some()
+    assert!(
+        app.session.as_ref().is_some_and(|s| s.ready()),
+        "missing globals (need a wlroots compositor with layer-shell)"
     );
 
-    let compositor = app.compositor.clone().expect("no wl_compositor");
-    let shm = app.shm.clone().expect("no wl_shm");
-    let shell = app
-        .shell
-        .clone()
-        .expect("compositor lacks wlr-layer-shell (need wlroots-based: labwc/sway)");
-
-    let surface = compositor.create_surface(&qh, ());
-    let ls = shell.get_layer_surface(
-        &surface,
-        None::<&wl_output::WlOutput>,
-        Layer::Top,
-        "ibde-spike".to_string(),
-        &qh,
-        (),
-    );
-    ls.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
-    ls.set_size(0, BAR_H as u32);
-    ls.set_exclusive_zone(BAR_H);
-    surface.commit();
+    let spec = LayerSpec::top_bar("ibde-spike", BAR_H);
+    let (surface, _ls) = app
+        .session
+        .as_mut()
+        .unwrap()
+        .create_layer(&spec, &qh)
+        .expect("layer shell unavailable");
+    app.surface = Some(surface);
     let _ = conn.flush();
     queue.roundtrip(&mut app).expect("no configure arrived");
-    assert!(app.configured, "layer surface never configured");
-
-    let w = if app.cfg_w > 0 { app.cfg_w } else { 1280 };
-    let h = if app.cfg_h > 0 { app.cfg_h } else { BAR_H };
-    app.buf = Some(ShmBuffer::new(&shm, w, h, &qh));
-    app.canvas = Some(Canvas::new(w, h).unwrap());
-
-    // initial frame: commit with damage so headless compositors start
-    // delivering frame callbacks
-    app.t0 = Some(Instant::now());
-    render_and_copy(&mut app, 0.0);
-    if let Some(buf) = &app.buf {
-        surface.attach(Some(buf.wayland_buffer()), 0, 0);
-        surface.damage_buffer(0, 0, buf.width, buf.height);
-    }
-    surface.commit();
-    let _ = conn.flush();
-    let _cb = surface.frame(&qh, ());
-    surface.commit();
-    let _ = conn.flush();
-
-    app.surface = Some(surface);
-    let _ = ls;
+    assert!(app.buf.is_some(), "configure never created buffers");
 
     let secs = seconds;
     std::thread::spawn(move || {
