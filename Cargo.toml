@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ibde-ui",
     "crates/ibde-terminal",
+    "crates/ibde-shell",
     "ui/spike-rs",
 ]
 
