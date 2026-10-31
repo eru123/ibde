@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ibde-ui",
+    "ui/spike-rs",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/eru123/ibde"
+
+[workspace.dependencies]
+ibde-ui = { path = "crates/ibde-ui" }
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+cairo-rs = "0.20"
+pango = "0.20"
+pangocairo = "0.20"
+memmap2 = "0.9"
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
