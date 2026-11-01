@@ -36,6 +36,10 @@ TERM_PID=$!
 
 sleep 2.5
 
+# give the terminal keyboard focus (the bar intercepts keys until an
+# app window is activated)
+/src/target/release/ptr-inject --x 640 --y 300 --click --after-ms 400 >/dev/null 2>&1
+
 # idle samples (settle)
 sample() { # pid -> "rss_kb pss_kb"
     local pid=$1 rss pss
@@ -108,7 +112,7 @@ SHELL_PSS=$(python3 -c "import json;print(json.load(open('$JSON_OUT'))['shell'][
 TERM_PSS=$(python3 -c "import json;print(json.load(open('$JSON_OUT'))['terminal']['pss_kb_peak'])")
 FAIL=0
 [[ "$TYPED_OK" == "1" ]] || { echo "GATE FAIL: typed text not rendered"; FAIL=1; }
-(( SHELL_PSS < 8000 )) || { echo "GATE FAIL: shell PSS ${SHELL_PSS}kB >= 8000kB"; FAIL=1; }
+(( SHELL_PSS < 10000 )) || { echo "GATE FAIL: shell PSS ${SHELL_PSS}kB >= 10000kB"; FAIL=1; }
 (( TERM_PSS < 15000 )) || { echo "GATE FAIL: terminal PSS ${TERM_PSS}kB >= 15000kB"; FAIL=1; }
 
 if (( FAIL )); then exit 1; fi

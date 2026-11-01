@@ -1,16 +1,16 @@
 {
   "profile": "container-sway-pixman",
-  "date": "2026-11-01T02:03:54Z",
+  "date": "2026-11-01T07:43:32Z",
   "typed_expected": "IBDE-WORKOUT-OK-42",
   "typed_ok": 1,
   "shell": {
-    "rss_kb_idle": 13316, "pss_kb_idle": 4595,
-    "rss_kb_peak": 13316, "pss_kb_peak": 4594,
-    "summary": "SUMMARY seconds=14 rss_kb=13316 bar_draws=15 dock_draws=1"
+    "rss_kb_idle": 16020, "pss_kb_idle": 8485,
+    "rss_kb_peak": 16636, "pss_kb_peak": 8971,
+    "summary": "SUMMARY seconds=14 rss_kb=16636 bar_draws=14 dock_draws=1"
   },
   "terminal": {
-    "rss_kb_idle": 19832, "pss_kb_idle": 9161,
-    "rss_kb_peak": 20644, "pss_kb_peak": 9745,
-    "summary": "SUMMARY exited=false rss_kb=20708"
+    "rss_kb_idle": 19976, "pss_kb_idle": 10873,
+    "rss_kb_peak": 20680, "pss_kb_peak": 11447,
+    "summary": "SUMMARY exited=false rss_kb=20744"
   }
 }

@@ -13,6 +13,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use ibde_ui::canvas::{self, Canvas};
+use ibde_ui::session::KeyboardFocus;
 use ibde_ui::session::{Connection, LayerSpec, QueueHandle, Session, SessionHost, WlSurface};
 use ibde_ui::shm::ShmBuffer;
 use ibde_ui::stats::{rss_kb, FpsCounter};
@@ -287,7 +288,7 @@ impl App {
                     let mut f = std::io::BufWriter::new(f);
                     let _ = write!(f, "P6\n{} {}\n255\n", k.canvas.width, k.canvas.height);
                     if let Ok(d) = k.canvas.surface_mut().data() {
-                        for px in d.chunks_exact(4) {
+                        for px in d.as_chunks::<4>().0 {
                             let _ = f.write(&[px[2], px[1], px[0]]);
                         }
                     }
@@ -418,7 +419,7 @@ impl App {
             height: 0,
             exclusive_zone: -1,
             margins: (150, 390, 150, 290),
-            keyboard_interactive: true,
+            keyboard_interactive: KeyboardFocus::Exclusive,
         };
         match session.create_layer(&spec, &qh) {
             Some((id, surface, ls)) => {
@@ -497,7 +498,7 @@ impl App {
             height: MENU_H as u32,
             exclusive_zone: 0,
             margins: (8, 0, BAR_H + 4, 0),
-            keyboard_interactive: false,
+            keyboard_interactive: KeyboardFocus::OnDemand,
         };
         match session.create_layer(&spec, &qh) {
             Some((id, surface, ls)) => {
@@ -595,7 +596,7 @@ impl App {
                 height: 56,
                 exclusive_zone: 0,
                 margins: (0, 0, 70, 0),
-                keyboard_interactive: false,
+                keyboard_interactive: KeyboardFocus::None,
             };
             match session.create_layer(&spec, &qh) {
                 Some((id, surface, ls)) => {
@@ -729,7 +730,7 @@ impl App {
                 height: 84,
                 exclusive_zone: 0,
                 margins: (0, 12, 12, 0),
-                keyboard_interactive: false,
+                keyboard_interactive: KeyboardFocus::None,
             };
             match session.create_layer(&spec, &qh) {
                 Some((id, surface, ls)) => {

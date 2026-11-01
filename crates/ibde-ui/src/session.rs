@@ -268,9 +268,11 @@ impl Session {
         if spec.exclusive_zone != 0 {
             ls.set_exclusive_zone(spec.exclusive_zone);
         }
-        if spec.keyboard_interactive {
-            ls.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
-        }
+        ls.set_keyboard_interactivity(match spec.keyboard_interactive {
+            KeyboardFocus::None => zwlr_layer_surface_v1::KeyboardInteractivity::None,
+            KeyboardFocus::OnDemand => zwlr_layer_surface_v1::KeyboardInteractivity::OnDemand,
+            KeyboardFocus::Exclusive => zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive,
+        });
         surface.commit();
         Some((_id, surface, ls))
     }
@@ -330,6 +332,18 @@ impl WindowSpec {
     }
 }
 
+/// Layer-surface keyboard focus request (v4 layer-shell).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum KeyboardFocus {
+    /// No keyboard (default).
+    None,
+    /// Keyboard when the user interacts with (clicks) the surface —
+    /// the bar's mode: app windows keep focus by default.
+    OnDemand,
+    /// All keys while mapped (spotlight overlay).
+    Exclusive,
+}
+
 /// Declarative layer-surface specification.
 pub struct LayerSpec {
     pub namespace: String,
@@ -340,8 +354,8 @@ pub struct LayerSpec {
     pub exclusive_zone: i32,
     /// (left, right, top, bottom) margins from the anchored edges.
     pub margins: (i32, i32, i32, i32),
-    /// Request exclusive keyboard focus (popovers, spotlight).
-    pub keyboard_interactive: bool,
+    /// Keyboard focus mode for this surface.
+    pub keyboard_interactive: KeyboardFocus,
 }
 
 impl LayerSpec {
@@ -358,7 +372,7 @@ impl LayerSpec {
             height: height as u32,
             exclusive_zone: height,
             margins: (0, 0, 0, 0),
-            keyboard_interactive: true,
+            keyboard_interactive: KeyboardFocus::OnDemand,
         }
     }
 
@@ -373,7 +387,7 @@ impl LayerSpec {
             height: height as u32,
             exclusive_zone: 0,
             margins: (0, 0, 0, gap),
-            keyboard_interactive: false,
+            keyboard_interactive: KeyboardFocus::None,
         }
     }
 }
