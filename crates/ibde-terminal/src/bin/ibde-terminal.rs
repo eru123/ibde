@@ -146,10 +146,10 @@ impl App {
 
     fn dump_grid(&self) {
         let Some(m) = self.model.as_ref() else { return };
-        println!("=== GRID START ===");
+        println!("=== GRID START === (view -{} rows)", m.grid.view);
         for y in 0..m.grid.rows() {
             let row: String = (0..m.grid.cols())
-                .filter_map(|x| m.grid.get(x, y))
+                .map(|x| m.grid.visible_row(y)[x])
                 .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
                 .collect();
             println!("|{}", row.trim_end());
@@ -241,10 +241,28 @@ impl SessionHost for App {
     }
 
     fn on_key(&mut self, keycode: u32, pressed: bool) {
+        const KEY_PGUP: u32 = 104;
+        const KEY_PGDN: u32 = 109;
         if !pressed || !self.focused {
             return;
         }
         let Some(k) = self.kbd.as_ref() else { return };
+        // scrollback: Shift+PageUp/Down (UX-SPEC power layer)
+        if k.shift_held() && (keycode == KEY_PGUP || keycode == KEY_PGDN) {
+            if let Some(m) = self.model.as_mut() {
+                let step = m.grid.rows() as i32;
+                if keycode == KEY_PGUP {
+                    m.grid.scroll_view(step);
+                } else {
+                    m.grid.scroll_view(-step);
+                }
+            }
+            let _ = self.render_if_dirty();
+            if let Some(conn) = &self.conn {
+                let _ = conn.flush();
+            }
+            return;
+        }
         let ev = k.translate(keycode + 8);
         if std::env::var_os("IBDE_DEBUG_KEYS").is_some() {
             eprintln!(

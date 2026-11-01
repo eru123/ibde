@@ -216,8 +216,11 @@ pub fn render_grid(atlas: &mut GlyphAtlas, canvas: &Canvas, grid: &mut TextGrid)
             cr.rectangle(x, cy, w, atlas.cell_h as f64);
             let _ = cr.fill();
         }
+        let row: Vec<Cell> = (0..grid.cols()).map(|x| grid.visible_row(y)[x]).collect();
         for x in 0..grid.cols() {
-            let Some(cell) = grid.get(x, y) else { continue };
+            let Some(cell) = row.get(x).copied() else {
+                continue;
+            };
             if cell.ch == ' ' {
                 continue;
             }

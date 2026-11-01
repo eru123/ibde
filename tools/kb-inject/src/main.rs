@@ -219,11 +219,20 @@ fn main() {
             xkb::Keymap::new_from_names(&ctx, "", "", "us", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)
                 .expect("keymap");
         let ctrl = 1u32 << keymap.mod_get_index("Control");
+        let shift = 1u32 << keymap.mod_get_index("Shift");
         let mut mods = 0u32;
         let key: u32 = match combo.as_str() {
             "ctrl+space" => {
                 mods = ctrl;
                 57 // evdev KEY_SPACE
+            }
+            "shift+pgup" => {
+                mods = shift;
+                104
+            }
+            "shift+pgdn" => {
+                mods = shift;
+                109
             }
             "esc" => 1,
             "enter" => 28,

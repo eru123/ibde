@@ -136,12 +136,19 @@ pub enum DamageSnapshot {
     Full,
 }
 
-/// A fixed-size grid of styled cells with damage tracking.
+/// Scrollback capacity (rows) — ADR-0011 budget: ≤25MB at 10k rows.
+const HISTORY_CAP: usize = 10_000;
+
+/// A fixed-size grid of styled cells with damage tracking, plus a
+/// scrollback history and a view offset (0 = live bottom).
 pub struct TextGrid {
     cols: usize,
     rows: usize,
     cells: Vec<Cell>,
     damage: Damage,
+    history: Vec<Vec<Cell>>,
+    /// rows scrolled back from the live view
+    pub view: usize,
 }
 
 impl TextGrid {
@@ -151,7 +158,41 @@ impl TextGrid {
             rows,
             cells: vec![Cell::default(); cols * rows],
             damage: Damage::new(rows),
+            history: Vec::new(),
+            view: 0,
         }
+    }
+
+    /// Row `y` of the current view: up to `view.min(rows)` rows from
+    /// the history tail, then the live grid.
+    pub fn visible_row(&self, y: usize) -> &[Cell] {
+        let from_hist = self.view.min(self.rows);
+        if y < from_hist {
+            let idx = self.history.len() - self.view + y;
+            &self.history[idx]
+        } else {
+            let gy = y - from_hist;
+            &self.cells[gy * self.cols..(gy + 1) * self.cols]
+        }
+    }
+
+    /// Scroll the view back (positive) or forward (negative); clamps to
+    /// [0, history.len()]. Marks everything dirty on change.
+    pub fn scroll_view(&mut self, delta: i32) {
+        let new_view = if delta < 0 {
+            self.view.saturating_sub((-delta) as usize)
+        } else {
+            self.view + delta as usize
+        }
+        .min(self.history.len());
+        if new_view != self.view {
+            self.view = new_view;
+            self.damage.mark_all();
+        }
+    }
+
+    pub fn history_len(&self) -> usize {
+        self.history.len()
     }
 
     pub fn cols(&self) -> usize {
@@ -182,11 +223,22 @@ impl TextGrid {
     }
 
     /// Scroll content up by `n` rows, blanking the bottom `n` rows.
-    /// O(cells) memcpy + O(rows) damage bookkeeping.
+    /// Pushes leaving rows into scrollback history. O(cells) memcpy +
+    /// O(rows) damage bookkeeping.
     pub fn scroll_up(&mut self, n: usize) {
         let n = n.min(self.rows);
         if n == 0 {
             return;
+        }
+        for i in 0..n {
+            self.history
+                .push(self.cells[i * self.cols..(i + 1) * self.cols].to_vec());
+        }
+        if self.history.len() > HISTORY_CAP {
+            let drop = self.history.len() - HISTORY_CAP;
+            self.history.drain(0..drop);
+            // keep the view anchored within the new bounds
+            self.view = self.view.min(HISTORY_CAP);
         }
         self.cells.copy_within(n * self.cols.., 0);
         let tail = &mut self.cells[(self.rows - n) * self.cols..];
@@ -197,10 +249,15 @@ impl TextGrid {
     }
 
     /// Resize preserving as much content as possible (top-left anchored).
+    /// History rows are re-padded to the new width.
     pub fn resize(&mut self, cols: usize, rows: usize) {
         if cols == self.cols && rows == self.rows {
             return;
         }
+        for row in self.history.iter_mut() {
+            row.resize(cols, Cell::default());
+        }
+        self.view = self.view.min(self.history.len());
         let mut next = vec![Cell::default(); cols * rows];
         let copy_rows = rows.min(self.rows);
         let copy_cols = cols.min(self.cols);
@@ -335,6 +392,41 @@ mod tests {
                                    // before each style boundary
         assert_eq!(runs[0], (0, 2, g.get(1, 0).unwrap()));
         assert_eq!(runs[1], (2, 2, g.get(3, 0).unwrap()));
+    }
+
+    #[test]
+    fn history_and_view() {
+        let mut g = TextGrid::new(4, 2);
+        let a = Cell {
+            ch: 'a',
+            ..Cell::default()
+        };
+        for round in 0..3 {
+            for x in 0..4 {
+                g.set(
+                    x,
+                    0,
+                    Cell {
+                        ch: (b'a' + round) as char,
+                        ..a
+                    },
+                );
+            }
+            g.scroll_up(1); // pushes row0 each time
+        }
+        assert_eq!(g.history_len(), 3);
+        // live grid was blanked by the last scroll
+        assert_eq!(g.visible_row(1)[0].ch, ' ');
+        // one back: newest history row on top
+        g.scroll_view(1);
+        assert_eq!(g.visible_row(0)[0].ch, 'c');
+        // fully back: oldest history row visible
+        g.scroll_view(2);
+        assert_eq!(g.visible_row(0)[0].ch, 'a');
+        // clamp forward
+        g.scroll_view(-99);
+        assert_eq!(g.view, 0);
+        assert_eq!(g.visible_row(1)[0].ch, ' ');
     }
 
     #[test]
