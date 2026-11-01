@@ -30,6 +30,7 @@ struct App {
     conn: Option<Connection>,
     qh: Option<QueueHandle<Self>>,
     surface: Option<WlSurface>,
+    xds: Option<ibde_ui::session::XdgSurface>,
     window_id: u64,
     /// last toplevel dims (0 = unset)
     top_w: i32,
@@ -55,6 +56,7 @@ impl App {
             conn: None,
             qh: None,
             surface: None,
+            xds: None,
             window_id: 0,
             top_w: 0,
             top_h: 0,
@@ -70,6 +72,14 @@ impl App {
             kbd: None,
             writer: None,
         }
+    }
+
+    fn cell_w(&self) -> usize {
+        self.atlas.as_ref().map(|a| a.cell_w as usize).unwrap_or(8)
+    }
+
+    fn cell_h(&self) -> usize {
+        self.atlas.as_ref().map(|a| a.cell_h as usize).unwrap_or(16)
     }
 
     fn cells(&self) -> (usize, usize) {
@@ -146,6 +156,25 @@ impl App {
         }
         println!("=== GRID END ===");
     }
+
+    /// Write the rendered canvas as a binary PPM (debug; no deps).
+    fn dump_canvas_ppm(&mut self, path: &str) {
+        use std::io::Write;
+        let Some(c) = self.canvas.as_mut() else {
+            return;
+        };
+        let Ok(f) = std::fs::File::create(path) else {
+            return;
+        };
+        let mut f = std::io::BufWriter::new(f);
+        let _ = write!(f, "P6\n{} {}\n255\n", c.width, c.height);
+        if let Ok(data) = c.surface_mut().data() {
+            for px in data.chunks_exact(4) {
+                // ARGB → RGB
+                let _ = f.write(&[px[2], px[1], px[0]]);
+            }
+        }
+    }
 }
 
 impl SessionHost for App {
@@ -164,6 +193,25 @@ impl SessionHost for App {
         if id == self.window_id {
             self.size_buffers();
             self.configured = true;
+            // Complete every configure cycle immediately: tell the
+            // compositor our geometry and commit a matching buffer
+            // (sway tiles xdg windows and waits for this before mapping).
+            if let (Some(xds), Some(m)) = (&self.xds, self.model.as_ref()) {
+                let w = (m.grid.cols() * self.cell_w()) as i32;
+                let h = (m.grid.rows() * self.cell_h()) as i32;
+                xds.set_window_geometry(0, 0, w, h);
+            }
+            if let Some(m) = self.model.as_mut() {
+                m.grid.mark_all_dirty();
+            }
+            let _ = self.render_if_dirty();
+            // request a frame like every mainstream client does
+            if let (Some(sf), Some(qh)) = (&self.surface, &self.qh) {
+                ibde_ui::session::request_frame(sf, self.window_id, qh);
+            }
+            if let Some(conn) = &self.conn {
+                let _ = conn.flush();
+            }
         }
     }
 
@@ -259,6 +307,7 @@ fn main() {
     let mut child = pair.slave.spawn_command(spawn).expect("spawn");
     drop(pair.slave);
     let mut reader = pair.master.try_clone_reader().expect("pty reader");
+    let mut pty_master = Some(pair.master);
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         use std::io::Read;
@@ -291,8 +340,8 @@ fn main() {
         "missing globals (need a wlroots compositor)"
     );
 
-    let spec = WindowSpec::titled("IBDE Terminal");
-    let (window_id, surface, _xds, _tl) = app
+    let spec = WindowSpec::app("IBDE Terminal", "ibde.terminal");
+    let (window_id, surface, xds, _tl) = app
         .session
         .as_mut()
         .unwrap()
@@ -300,16 +349,18 @@ fn main() {
         .expect("xdg_wm_base unavailable");
     app.window_id = window_id;
     app.surface = Some(surface);
+    app.xds = Some(xds);
     let _ = conn.flush();
     queue.roundtrip(&mut app).expect("no window configure");
     assert!(app.configured, "window never configured");
 
-    // keyboard (compositor keymap follows via on_keymap, if a seat exists)
-    if let Some(session) = app.session.as_mut() {
-        let _keyboard = session.keyboard(&qh);
-    }
+    // keyboard: bound automatically by the session glue when (and only
+    // when) the seat advertises the capability; keymap + keys follow via
+    // SessionHost. Never request one manually — see session.rs note.
     // PTY writer for keyboard input
-    app.writer = Some(pair.master.take_writer().expect("pty writer"));
+    if let Some(m) = pty_master.as_mut() {
+        app.writer = Some(m.take_writer().expect("pty writer"));
+    }
 
     // --- Main loop: PTY channel + wayland, poll-free via recv_timeout ---
     let mut feed = Feed::new();
@@ -357,6 +408,10 @@ fn main() {
 
     if dump {
         app.dump_grid();
+        if let Ok(p) = std::env::var("IBDE_DUMP_CANVAS") {
+            app.dump_canvas_ppm(&p);
+        }
+
         println!("SUMMARY exited={} rss_kb={}", exited, rss_kb());
     }
     let _ = child.kill();

@@ -176,18 +176,14 @@ impl Session {
         self.compositor.is_some() && self.shm.is_some()
     }
 
-    /// Bind the seat's keyboard (call after the globals roundtrip).
-    /// The compositor's keymap and key events follow via SessionHost.
-    pub fn keyboard<D>(&mut self, qh: &QueueHandle<D>) -> Option<WlKeyboard>
-    where
-        D: Dispatch<WlKeyboard, ()> + 'static,
-    {
-        let seat = self.seat.as_ref()?;
-        Some(seat.get_keyboard(qh, ()))
-    }
+    /// NOTE: there is deliberately no manual `keyboard()` binder. The
+    /// delegate macro binds `wl_keyboard` when (and only when) the seat
+    /// advertises the Keyboard capability — requesting a keyboard from a
+    /// seat that lacks one is a protocol error (wl_seat
+    /// `missing_capability`) that kills the connection.
 
-    /// Create a layer surface per `spec` and commit it; the configure
-    /// arrives asynchronously in `on_layer_configure`.
+    // Create a layer surface per `spec` and commit it; the configure
+    // arrives asynchronously in `on_layer_configure`.
     pub fn create_layer<D>(
         &mut self,
         spec: &LayerSpec,
@@ -247,6 +243,7 @@ impl Session {
         let xds = wm.get_xdg_surface(&surface, qh, WindowData { id });
         let tl = xds.get_toplevel(qh, WindowData { id });
         tl.set_title(spec.title.clone());
+        tl.set_app_id(spec.app_id.clone());
         surface.commit();
         Some((id, surface, xds, tl))
     }
@@ -255,6 +252,9 @@ impl Session {
 /// Declarative xdg-window specification.
 pub struct WindowSpec {
     pub title: String,
+    /// e.g. "ibde-terminal" — identifies the app to the compositor
+    /// (taskbars, switchers, app menus).
+    pub app_id: String,
     /// Preferred size in px; None lets the app choose on configure.
     pub size: Option<(i32, i32)>,
 }
@@ -263,6 +263,15 @@ impl WindowSpec {
     pub fn titled(title: &str) -> Self {
         WindowSpec {
             title: title.to_string(),
+            app_id: "ibde.app".to_string(),
+            size: None,
+        }
+    }
+
+    pub fn app(title: &str, app_id: &str) -> Self {
+        WindowSpec {
+            title: title.to_string(),
+            app_id: app_id.to_string(),
             size: None,
         }
     }
@@ -345,7 +354,7 @@ pub fn handle_registry_global<D>(
                 session.layer_shell = Some(registry.bind(name, version.min(4), qh, ()))
             }
             "xdg_wm_base" => {
-                session.xdg_wm_base = Some(registry.bind(name, version.min(1), qh, ()))
+                session.xdg_wm_base = Some(registry.bind(name, version.min(5), qh, ()))
             }
             "wl_seat" => session.seat = Some(registry.bind(name, version.min(4), qh, ())),
             _ => {}

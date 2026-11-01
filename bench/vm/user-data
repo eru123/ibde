@@ -17,6 +17,7 @@ packages:
   - labwc
   - waybar
   - seatd
+  - grim
 write_files:
   - path: /usr/local/bin/ibde-bench-session
     permissions: "0755"
@@ -34,6 +35,7 @@ write_files:
     content: |
       #!/bin/sh
       # labwc -s runs this; stdout/stderr land on the serial tty.
+      [ -f /etc/ibde/hold ] && echo "HOLD-PRESENT" || echo "HOLD-MISSING"
       waybar &
       sleep 15
       echo "=== ibde-bench baseline ==="
@@ -52,12 +54,18 @@ write_files:
       ps -e --no-headers | wc -l
       echo "=== end ==="
       sleep 1
+      if [ -f /etc/ibde/hold ]; then
+        # debug hold: keep the session alive for SSH experiments
+        exec sleep 100000
+      fi
       sudo -n poweroff
 runcmd:
   # Debian's seatd grants seat access via the video group (there is no
   # 'seatd' group); DRM nodes are video-group too.
   - usermod -aG video debian
   - systemctl disable --now unattended-upgrades || true
+  # DEBUG (remove after labwc xdg investigation): hold the session open
+  - touch /etc/ibde/hold
   - systemctl enable --now seatd
   - mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
   - |
