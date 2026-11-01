@@ -1,0 +1,14 @@
+[Unit]
+Description=IBDE settings daemon (org.ibde.Settings1)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ibde-settingsd
+Restart=on-failure
+RestartSec=2
+Slice=session.slice
+
+[Install]
+WantedBy=graphical-session.target

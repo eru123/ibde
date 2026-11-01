@@ -1,0 +1,14 @@
+[Unit]
+Description=IBDE shell (menubar, dock, launcher, notifications)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ibde-shell
+Restart=on-failure
+RestartSec=2
+Slice=session.slice
+
+[Install]
+WantedBy=graphical-session.target

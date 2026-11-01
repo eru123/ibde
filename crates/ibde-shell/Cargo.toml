@@ -32,5 +32,7 @@ assets = [
     ["target/release/ibde-shell", "usr/bin/ibde-shell", "755"],
     ["../../packaging/ibde-session", "usr/bin/", "755"],
     ["../../packaging/ibde.desktop", "usr/share/wayland-sessions/", "644"],
+    ["../../packaging/systemd/ibde-shell.service", "usr/lib/systemd/user/", "644"],
+    ["../../packaging/systemd/ibde-settingsd.service", "usr/lib/systemd/user/", "644"],
 ]
 
