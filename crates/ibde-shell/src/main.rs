@@ -151,7 +151,9 @@ impl App {
     }
 
     fn draw_menu(&mut self) {
-        let Some(id) = self.menu.as_ref().map(|m| m.id) else { return };
+        let Some(id) = self.menu.as_ref().map(|m| m.id) else {
+            return;
+        };
         let hovered = self.menu_hover;
         self.render_module(id, move |cr, w, h| draw_menu_content(cr, w, h, hovered));
     }
@@ -160,21 +162,28 @@ impl App {
         if self.menu.is_some() {
             return;
         }
-        let Some(session) = self.session.as_mut() else { return };
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
         let Some(qh) = self.qh.clone() else { return };
         // popover below the IBDE pill (top-left), above everything else
         let spec = ibde_ui::session::LayerSpec {
             namespace: "ibde-menu".into(),
             layer: ibde_ui::session::Layer::Top,
             anchors: ibde_ui::session::Anchor::Top | ibde_ui::session::Anchor::Left,
-            width: MENU_W,
-            height: MENU_H,
+            width: MENU_W as u32,
+            height: MENU_H as u32,
             exclusive_zone: 0,
             margins: (8, 0, BAR_H + 4, 0),
         };
         match session.create_layer(&spec, &qh) {
             Some((id, surface, ls)) => {
-                self.menu = Some(Module { id, surface, ls: Some(ls), kit: None });
+                self.menu = Some(Module {
+                    id,
+                    surface,
+                    ls: Some(ls),
+                    kit: None,
+                });
             }
             None => eprintln!("[shell] menu layer unavailable"),
         }
@@ -211,8 +220,12 @@ impl App {
         let (Some(session), Some(qh)) = (self.session.as_ref(), self.qh.clone()) else {
             return;
         };
-        let Some(shm) = session.shm.clone() else { return };
-        let Some(compositor) = session.compositor.clone() else { return };
+        let Some(shm) = session.shm.clone() else {
+            return;
+        };
+        let Some(compositor) = session.compositor.clone() else {
+            return;
+        };
         let surface = compositor.create_surface(&qh, ());
         let mut buf = ShmBuffer::new(&shm, 12, 18, &qh);
         {
@@ -284,9 +297,7 @@ impl SessionHost for App {
         let qh = self.qh.clone().expect("configure without qh");
         let is_bar = self.bar.as_ref().is_some_and(|b| b.id == id);
         let is_menu = self.menu.as_ref().is_some_and(|m| m.id == id);
-        let is_known = is_bar
-            || is_menu
-            || self.dock.as_ref().is_some_and(|d| d.id == id);
+        let is_known = is_bar || is_menu || self.dock.as_ref().is_some_and(|d| d.id == id);
         if !is_known {
             eprintln!("[shell] configure for unknown surface {id}");
             return;
@@ -318,13 +329,7 @@ impl SessionHost for App {
         }
     }
 
-    fn on_pointer_enter(
-        &mut self,
-        surface: &WlSurface,
-        serial: u32,
-        sx: f64,
-        sy: f64,
-    ) {
+    fn on_pointer_enter(&mut self, surface: &WlSurface, serial: u32, sx: f64, sy: f64) {
         self.set_cursor(serial);
         if self.dock.as_ref().is_some_and(|d| &d.surface == surface) {
             self.over_dock = true;
@@ -551,10 +556,22 @@ fn draw_menu_content(cr: &cairo::Context, width: i32, height: i32, hovered: Opti
     cr.set_source_rgba(0.85, 0.85, 0.87, 1.0);
     cr.set_line_width(1.0);
     cr.new_path();
-    cr.arc(10.0, 10.0, 9.5, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+    cr.arc(
+        10.0,
+        10.0,
+        9.5,
+        std::f64::consts::PI,
+        1.5 * std::f64::consts::PI,
+    );
     cr.arc(w - 10.0, 10.0, 9.5, -0.5 * std::f64::consts::PI, 0.0);
     cr.arc(w - 10.0, h - 10.0, 9.5, 0.0, 0.5 * std::f64::consts::PI);
-    cr.arc(10.0, h - 10.0, 9.5, 0.5 * std::f64::consts::PI, std::f64::consts::PI);
+    cr.arc(
+        10.0,
+        h - 10.0,
+        9.5,
+        0.5 * std::f64::consts::PI,
+        std::f64::consts::PI,
+    );
     cr.close_path();
     let _ = cr.stroke();
 
@@ -565,14 +582,7 @@ fn draw_menu_content(cr: &cairo::Context, width: i32, height: i32, hovered: Opti
         f.set_weight(pango::Weight::Semibold);
         f
     };
-    canvas::draw_label(
-        cr,
-        "IBDE",
-        &font_semibold,
-        14.0,
-        7.0,
-        theme::TEXT,
-    );
+    canvas::draw_label(cr, "IBDE", &font_semibold, 14.0, 7.0, theme::TEXT);
     cr.set_source_rgba(0.88, 0.88, 0.90, 1.0);
     cr.rectangle(8.0, 23.5, w - 16.0, 1.0);
     let _ = cr.fill();
@@ -580,10 +590,25 @@ fn draw_menu_content(cr: &cairo::Context, width: i32, height: i32, hovered: Opti
     for (i, row) in MENU_ROWS.iter().enumerate() {
         let y = 24.0 + i as f64 * MENU_ROW_H;
         if hovered == Some(i) {
-            canvas::fill_rounded_rect(cr, 6.0, y + 2.0, w - 12.0, MENU_ROW_H - 6.0, 6.0, (0.90, 0.91, 0.94, 1.0));
+            canvas::fill_rounded_rect(
+                cr,
+                6.0,
+                y + 2.0,
+                w - 12.0,
+                MENU_ROW_H - 6.0,
+                6.0,
+                (0.90, 0.91, 0.94, 1.0),
+            );
         }
         let (_tw, th) = canvas::label_size(cr, row, &font);
-        canvas::draw_label(cr, row, &font, 16.0, y + (MENU_ROW_H - th as f64) / 2.0, theme::TEXT);
+        canvas::draw_label(
+            cr,
+            row,
+            &font,
+            16.0,
+            y + (MENU_ROW_H - th as f64) / 2.0,
+            theme::TEXT,
+        );
     }
 }
 

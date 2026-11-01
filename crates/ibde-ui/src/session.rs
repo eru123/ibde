@@ -129,13 +129,7 @@ pub trait SessionHost {
         let _ = (depressed, latched, locked, group);
     }
     /// Pointer entered one of our surfaces (surface-local coords).
-    fn on_pointer_enter(
-        &mut self,
-        surface: &WlSurface,
-        serial: u32,
-        sx: f64,
-        sy: f64,
-    ) {
+    fn on_pointer_enter(&mut self, surface: &WlSurface, serial: u32, sx: f64, sy: f64) {
         let _ = (surface, serial, sx, sy);
     }
     /// Pointer left one of our surfaces.
