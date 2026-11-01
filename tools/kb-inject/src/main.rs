@@ -267,6 +267,10 @@ fn main() {
                         mods = ctrl;
                         109
                     }
+                    "ctrl+alt+l" => {
+                        mods = ctrl | (1u32 << keymap.mod_get_index("Mod1"));
+                        38 // evdev KEY_L
+                    }
                     "esc" => 1,
                     "enter" => 28,
                     "up" => 103,

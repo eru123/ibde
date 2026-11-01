@@ -26,6 +26,7 @@ pub struct Keyboard {
     state: xkb::State,
     ctrl_index: xkb::ModIndex,
     shift_index: xkb::ModIndex,
+    alt_index: xkb::ModIndex,
 }
 
 impl Keyboard {
@@ -43,6 +44,7 @@ impl Keyboard {
         )?;
         let ctrl_index = keymap.mod_get_index("Control");
         let shift_index = keymap.mod_get_index("Shift");
+        let alt_index = keymap.mod_get_index("Mod1");
         let state = xkb::State::new(&keymap);
         Some(Self {
             _ctx: ctx,
@@ -50,6 +52,7 @@ impl Keyboard {
             state,
             ctrl_index,
             shift_index,
+            alt_index,
         })
     }
 
@@ -72,6 +75,7 @@ impl Keyboard {
         .ok()??;
         let ctrl_index = keymap.mod_get_index("Control");
         let shift_index = keymap.mod_get_index("Shift");
+        let alt_index = keymap.mod_get_index("Mod1");
         let state = xkb::State::new(&keymap);
         Some(Self {
             _ctx: ctx,
@@ -79,6 +83,7 @@ impl Keyboard {
             state,
             ctrl_index,
             shift_index,
+            alt_index,
         })
     }
 
@@ -103,6 +108,11 @@ impl Keyboard {
     pub fn shift_held(&self) -> bool {
         self.state
             .mod_index_is_active(self.shift_index, xkb::STATE_MODS_EFFECTIVE)
+    }
+
+    pub fn alt_held(&self) -> bool {
+        self.state
+            .mod_index_is_active(self.alt_index, xkb::STATE_MODS_EFFECTIVE)
     }
 
     /// Translate an evdev keycode (raw wl_keyboard key + 8 handled by

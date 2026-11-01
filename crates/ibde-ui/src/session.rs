@@ -44,6 +44,12 @@ pub use wayland_client::protocol::wl_shm_pool::WlShmPool;
 pub use wayland_client::protocol::wl_surface;
 pub use wayland_client::protocol::wl_surface::WlSurface;
 pub use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
+pub use wayland_protocols::ext::session_lock::v1::client::ext_session_lock_manager_v1::ExtSessionLockManagerV1;
+pub use wayland_protocols::ext::session_lock::v1::client::ext_session_lock_surface_v1::ExtSessionLockSurfaceV1;
+pub use wayland_protocols::ext::session_lock::v1::client::ext_session_lock_v1::ExtSessionLockV1;
+pub use wayland_protocols::ext::session_lock::v1::client::{
+    ext_session_lock_manager_v1, ext_session_lock_surface_v1, ext_session_lock_v1,
+};
 pub use wayland_protocols::xdg::shell::client::xdg_surface;
 pub use wayland_protocols::xdg::shell::client::xdg_surface::XdgSurface;
 pub use wayland_protocols::xdg::shell::client::xdg_toplevel;
@@ -144,6 +150,20 @@ pub trait SessionHost {
     fn on_pointer_button(&mut self, button: u32, pressed: bool) {
         let _ = (button, pressed);
     }
+    /// The session lock is engaged: all outputs will get lock surfaces.
+    fn on_lock_locked(&mut self) {}
+    /// A lock surface was configured (ack it, then attach + commit).
+    fn on_lock_surface_configure(
+        &mut self,
+        surface: &ExtSessionLockSurfaceV1,
+        serial: u32,
+        width: i32,
+        height: i32,
+    ) {
+        let _ = (surface, serial, width, height);
+    }
+    /// The compositor finished/unlocked the session lock.
+    fn on_lock_finished(&mut self) {}
     /// Frame callback for a surface: render, commit, re-request.
     fn on_frame(&mut self, surface_id: u64) {
         let _ = surface_id;
@@ -157,6 +177,10 @@ pub struct Session {
     pub layer_shell: Option<ZwlrLayerShellV1>,
     pub xdg_wm_base: Option<XdgWmBase>,
     pub seat: Option<WlSeat>,
+    /// ext-session-lock manager (lock screen infra).
+    pub lock_manager: Option<ExtSessionLockManagerV1>,
+    /// first bound output (single-head v0; lock surfaces are per-output).
+    pub output: Option<WlOutput>,
     /// Bound when the seat advertises Pointer — hosts use it for
     /// set_cursor during on_pointer_enter.
     pub pointer: Option<WlPointer>,
@@ -175,6 +199,8 @@ impl Session {
             + Dispatch<ZwlrLayerShellV1, ()>
             + Dispatch<XdgWmBase, ()>
             + Dispatch<WlSeat, ()>
+            + Dispatch<ExtSessionLockManagerV1, ()>
+            + Dispatch<WlOutput, ()>
             + 'static,
     {
         *state.session_slot() = Some(Session {
@@ -183,6 +209,8 @@ impl Session {
             layer_shell: None,
             xdg_wm_base: None,
             seat: None,
+            lock_manager: None,
+            output: None,
             pointer: None,
             next_id: 0,
         });
@@ -373,6 +401,8 @@ pub fn handle_registry_global<D>(
         + Dispatch<ZwlrLayerShellV1, ()>
         + Dispatch<XdgWmBase, ()>
         + Dispatch<WlSeat, ()>
+        + Dispatch<ExtSessionLockManagerV1, ()>
+        + Dispatch<WlOutput, ()>
         + 'static,
 {
     let was_ready = state.session_slot().as_ref().is_some_and(|s| s.ready());
@@ -389,6 +419,14 @@ pub fn handle_registry_global<D>(
                 session.xdg_wm_base = Some(registry.bind(name, version.min(5), qh, ()))
             }
             "wl_seat" => session.seat = Some(registry.bind(name, version.min(4), qh, ())),
+            "wl_output" => {
+                if session.output.is_none() {
+                    session.output = Some(registry.bind(name, version.min(1), qh, ()))
+                }
+            }
+            "ext_session_lock_manager_v1" => {
+                session.lock_manager = Some(registry.bind(name, version.min(1), qh, ()))
+            }
             _ => {}
         }
     }
@@ -677,6 +715,60 @@ macro_rules! delegate_ibde_session {
                         state.on_pointer_button(button, pressed);
                     }
                     _ => {}
+                }
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::ExtSessionLockManagerV1, ()> for $app {
+            fn event(
+                _: &mut Self,
+                _: &$crate::session::ExtSessionLockManagerV1,
+                _: $crate::session::ext_session_lock_manager_v1::Event,
+                _: &(),
+                _: &$crate::session::Connection,
+                _: &$crate::session::QueueHandle<Self>,
+            ) {
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::ExtSessionLockV1, ()> for $app {
+            fn event(
+                state: &mut Self,
+                _lock: &$crate::session::ExtSessionLockV1,
+                event: $crate::session::ext_session_lock_v1::Event,
+                _data: &(),
+                _conn: &$crate::session::Connection,
+                _qh: &$crate::session::QueueHandle<Self>,
+            ) {
+                match event {
+                    $crate::session::ext_session_lock_v1::Event::Locked => {
+                        state.on_lock_locked();
+                    }
+                    $crate::session::ext_session_lock_v1::Event::Finished => {
+                        state.on_lock_finished();
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::ExtSessionLockSurfaceV1, ()> for $app {
+            fn event(
+                state: &mut Self,
+                surface: &$crate::session::ExtSessionLockSurfaceV1,
+                event: $crate::session::ext_session_lock_surface_v1::Event,
+                _data: &(),
+                _conn: &$crate::session::Connection,
+                _qh: &$crate::session::QueueHandle<Self>,
+            ) {
+                if let $crate::session::ext_session_lock_surface_v1::Event::Configure {
+                    serial,
+                    width,
+                    height,
+                } = event
+                {
+                    surface.ack_configure(serial);
+                    state.on_lock_surface_configure(surface, serial, width as i32, height as i32);
                 }
             }
         }

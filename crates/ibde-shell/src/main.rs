@@ -90,6 +90,13 @@ struct App {
     toast_data: Option<Toast>,
     osd: Option<Module>,
     osd_state: Option<Osd>,
+    focused: bool,
+    locked: bool,
+    lock_obj: Option<ibde_ui::session::ExtSessionLockV1>,
+    lock_surface: Option<ibde_ui::session::ExtSessionLockSurfaceV1>,
+    lock_wl_surface: Option<WlSurface>,
+    lock_kit: Option<Kit>,
+    lock_pw: String,
     vol: u8,
     bright: u8,
     spot_query: String,
@@ -215,6 +222,13 @@ impl App {
             toast_data: None,
             osd: None,
             osd_state: None,
+            focused: false,
+            locked: false,
+            lock_obj: None,
+            lock_surface: None,
+            lock_wl_surface: None,
+            lock_kit: None,
+            lock_pw: String::new(),
             vol: 65,
             bright: 80,
             spot_query: String::new(),
@@ -621,6 +635,64 @@ impl App {
         });
     }
 
+    fn lock_session(&mut self) {
+        if self.locked {
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let Some(qh) = self.qh.clone() else { return };
+        let Some(mgr) = session.lock_manager.clone() else {
+            eprintln!("[shell] no ext_session_lock_manager");
+            return;
+        };
+        let lock = mgr.lock(&qh, ());
+        // per protocol: we own the wl_surface; the lock wraps it per output
+        if let (Some(compositor), Some(output)) =
+            (session.compositor.clone(), session.output.clone())
+        {
+            let wl = compositor.create_surface(&qh, ());
+            let _ls = lock.get_lock_surface(&wl, &output, &qh, ());
+            self.lock_wl_surface = Some(wl);
+        }
+        self.lock_obj = Some(lock);
+        let _ = self.conn.as_ref().map(|c| c.flush());
+    }
+
+    fn unlock_session(&mut self) {
+        if let Some(lock) = self.lock_obj.take() {
+            lock.unlock_and_destroy();
+        }
+        self.locked = false;
+        self.lock_pw.clear();
+        self.lock_kit = None;
+        if let Some(conn) = &self.conn {
+            let _ = conn.flush();
+        }
+    }
+
+    fn draw_lock(&mut self) {
+        let Some(k) = self.lock_kit.as_mut() else {
+            return;
+        };
+        let Some(surface) = self.lock_wl_surface.clone() else {
+            return;
+        };
+        let pw = self.lock_pw.clone();
+        {
+            let cr = k.canvas.context().unwrap();
+            draw_lock_content(&cr, k.canvas.width, k.canvas.height, &pw);
+        }
+        k.canvas.copy_to(&mut k.buf);
+        surface.attach(Some(k.buf.wayland_buffer()), 0, 0);
+        surface.damage_buffer(0, 0, k.buf.width, k.buf.height);
+        surface.commit();
+        if let Some(conn) = &self.conn {
+            let _ = conn.flush();
+        }
+    }
+
     fn show_toast(&mut self, t: Toast) {
         if self.toast.is_none() {
             let Some(session) = self.session.as_mut() else {
@@ -760,6 +832,48 @@ impl SessionHost for App {
         }
     }
 
+    fn on_keyboard_enter(&mut self, surface: &WlSurface) {
+        let bar = self.bar.as_ref().map(|m| &m.surface);
+        self.focused = bar == Some(surface) || self.lock_wl_surface.as_ref() == Some(surface);
+    }
+
+    fn on_keyboard_leave(&mut self, _surface: &WlSurface) {
+        self.focused = false;
+    }
+
+    fn on_lock_locked(&mut self) {
+        self.locked = true;
+        eprintln!("[shell] session locked");
+    }
+
+    fn on_lock_surface_configure(
+        &mut self,
+        surface: &ibde_ui::session::ExtSessionLockSurfaceV1,
+        _serial: u32,
+        width: i32,
+        height: i32,
+    ) {
+        let shm = self
+            .session
+            .as_ref()
+            .and_then(|s| s.shm.clone())
+            .expect("lock configure without shm");
+        let qh = self.qh.clone().expect("lock configure without qh");
+        eprintln!("[shell] lock surface configure {width}x{height}");
+        self.lock_surface = Some(surface.clone());
+        self.lock_kit = Some(Kit {
+            buf: ShmBuffer::new(&shm, width, height, &qh),
+            canvas: Canvas::new(width, height).expect("lock canvas"),
+            drawn: 0,
+        });
+        self.draw_lock();
+    }
+
+    fn on_lock_finished(&mut self) {
+        eprintln!("[shell] session unlocked");
+        self.unlock_session();
+    }
+
     fn on_layer_closed(&mut self, id: u64) {
         eprintln!("[shell] layer {id} closed");
         if self.menu.as_ref().is_some_and(|m| m.id == id) {
@@ -792,6 +906,31 @@ impl SessionHost for App {
         const KEY_DOWN: u32 = 108;
         const KEY_BACKSPACE: u32 = 14;
 
+        // session lock: Ctrl+Alt+L (UX-SPEC §2/§9)
+        const KEY_L: u32 = 38;
+        if self.locked {
+            const KEY_ENTER: u32 = 28;
+            const KEY_BACKSPACE: u32 = 14;
+            if keycode == KEY_ENTER {
+                // v0 skeleton: NO AUTH — any password unlocks. Real PAM
+                // integration is a Phase-3 item (ADR ladder).
+                self.unlock_session();
+            } else if keycode == KEY_BACKSPACE {
+                self.lock_pw.pop();
+                self.draw_lock();
+            } else {
+                let ev = k.translate(keycode + 8);
+                if !ev.utf8.is_empty() && ev.utf8.chars().all(|c| !c.is_control()) {
+                    self.lock_pw.push_str(&ev.utf8);
+                    self.draw_lock();
+                }
+            }
+            return;
+        }
+        if k.ctrl_held() && k.alt_held() && keycode == KEY_L {
+            self.lock_session();
+            return;
+        }
         // media keys drive the OSD (UX-SPEC §9); bar has keyboard focus
         const KEY_VOL_DOWN: u32 = 114;
         const KEY_VOL_UP: u32 = 115;
@@ -1111,6 +1250,55 @@ fn fuzzy_score(query: &str, name: &str) -> Option<i32> {
         return None;
     }
     matched_any.then_some(score)
+}
+
+/// Draw the lock screen (dark, big clock, password dots).
+fn draw_lock_content(cr: &cairo::Context, width: i32, height: i32, pw: &str) {
+    let w = width as f64;
+    let h = height as f64;
+    cr.set_operator(cairo::Operator::Over);
+    cr.set_source_rgba(0.07, 0.08, 0.10, 1.0);
+    cr.rectangle(0.0, 0.0, w, h);
+    let _ = cr.fill();
+
+    let clock = clock_hm();
+    let big = {
+        let mut f = pango::FontDescription::from_string("Sans 64");
+        f.set_weight(pango::Weight::Light);
+        f
+    };
+    let (_cw, ch) = canvas::label_size(cr, &clock, &big);
+    canvas::draw_label(
+        cr,
+        &clock,
+        &big,
+        (w - _cw as f64) / 2.0,
+        h * 0.28,
+        (1.0, 1.0, 1.0, 0.95),
+    );
+
+    let hint = "Password (v0: no auth — press Enter)";
+    let small = pango::FontDescription::from_string("Sans 11");
+    let (_hw, _hh) = canvas::label_size(cr, hint, &small);
+    canvas::draw_label(
+        cr,
+        hint,
+        &small,
+        (w - _hw as f64) / 2.0,
+        h * 0.28 + ch as f64 + 48.0,
+        theme::TEXT_MUTED,
+    );
+    // password dots
+    let dots: String = std::iter::repeat_n('\u{2022}', pw.chars().count()).collect();
+    let (_dw, _dh) = canvas::label_size(cr, &dots, &small);
+    canvas::draw_label(
+        cr,
+        &dots,
+        &small,
+        (w - _dw as f64) / 2.0,
+        h * 0.28 + ch as f64 + 76.0,
+        (1.0, 1.0, 1.0, 1.0),
+    );
 }
 
 fn draw_osd_content(
