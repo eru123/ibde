@@ -12,11 +12,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: install native deps (cairo, pango, wayland)
+      - name: install native deps (cairo, pango, wayland, xkb)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libcairo2-dev libpango1.0-dev libwayland-dev pkg-config
+            libcairo2-dev libpango1.0-dev libwayland-dev \
+            libxkbcommon-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -39,4 +40,39 @@ jobs:
           name: ibde-binaries-amd64
           path: |
             target/release/ibde-spike
+            target/release/ibde-shell
+            target/release/ibde-terminal
           if-no-files-found: error
+
+  workout:
+    name: bench v1 interactive workout (headless sway)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install native deps (cairo, pango, wayland, xkb)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2-dev libpango1.0-dev libwayland-dev \
+            libxkbcommon-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: build workspace
+        run: cargo build --release
+
+      - name: build sway test image
+        run: docker build -t ibde-sway-test bench/docker/sway-test
+
+      - name: interactive workout (typed text + PSS gates)
+        run: bench/run-workout.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workout-evidence
+          path: |
+            bench/results/workout.json
+            bench/shots/workout.png
+          if-no-files-found: warn
