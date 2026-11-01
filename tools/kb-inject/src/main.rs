@@ -251,6 +251,22 @@ fn main() {
                         mods = ctrl | shift;
                         33
                     }
+                    "ctrl+shift+t" => {
+                        mods = ctrl | shift;
+                        20
+                    }
+                    "ctrl+shift+w" => {
+                        mods = ctrl | shift;
+                        17
+                    }
+                    "ctrl+pgup" => {
+                        mods = ctrl;
+                        104
+                    }
+                    "ctrl+pgdn" => {
+                        mods = ctrl;
+                        109
+                    }
                     "esc" => 1,
                     "enter" => 28,
                     "up" => 103,

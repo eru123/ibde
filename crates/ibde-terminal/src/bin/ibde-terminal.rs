@@ -1,10 +1,9 @@
-//! ibde-terminal — the flagship window (ADR-0011), v0.5-milestone slice.
+//! ibde-terminal — the flagship window (ADR-0011).
 //!
-//! End-to-end path proven here: PTY bytes → vte parser (TermModel) →
-//! TextGrid damage → glyph atlas → wl_shm canvas → xdg toplevel commit.
-//! Input (wl_keyboard + xkbcommon) lands in the next chunk; until then
-//! this runs a command non-interactively, which the bench and the
-//! headless test rig exploit via `--dump`.
+//! End-to-end path: PTY bytes → vte parser (TermModel) → TextGrid damage
+//! → glyph atlas → wl_shm canvas → xdg toplevel commit. Power layer:
+//! scrollback (Shift+PgUp/PgDn), search (Ctrl+Shift+F), tabs
+//! (Ctrl+Shift+T new, Ctrl+Shift+W close, Ctrl+PgUp/PgDn switch).
 //!
 //! Usage:
 //!   ibde-terminal [--exec "CMD"] [--seconds N] [--cols N] [--rows N]
@@ -21,9 +20,19 @@ use ibde_ui::session::{Connection, QueueHandle, Session, SessionHost, WindowSpec
 use ibde_ui::shm::ShmBuffer;
 use ibde_ui::stats::rss_kb;
 
-use portable_pty::{CommandBuilder, NativePtySystem, PtySystem};
+use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySystem};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
+
+/// One terminal tab: its own PTY, model, and parser.
+struct Tab {
+    model: TermModel,
+    feed: Feed,
+    writer: Box<dyn std::io::Write + Send>,
+    child: Box<dyn Child + Send + Sync>,
+    _master: Box<dyn MasterPty + Send>,
+    title: String,
+}
 
 struct App {
     session: Option<Session>,
@@ -38,7 +47,9 @@ struct App {
     buf: Option<ShmBuffer>,
     canvas: Option<Canvas>,
     atlas: Option<GlyphAtlas>,
-    model: Option<TermModel>,
+    tabs: Vec<Tab>,
+    active: usize,
+    exec_cmd: Option<String>,
     default_cols: usize,
     default_rows: usize,
     font_size: i32,
@@ -46,14 +57,19 @@ struct App {
     search: Option<String>,
     last_match: Option<usize>,
     needs_render: bool,
+    pending_new_tab: bool,
     // input
     focused: bool,
     kbd: Option<ibde_ui::input::Keyboard>,
-    writer: Option<Box<dyn std::io::Write + Send>>,
 }
 
 impl App {
-    fn new(default_cols: usize, default_rows: usize, font_size: i32) -> Self {
+    fn new(
+        exec_cmd: Option<String>,
+        default_cols: usize,
+        default_rows: usize,
+        font_size: i32,
+    ) -> Self {
         Self {
             session: None,
             conn: None,
@@ -66,7 +82,9 @@ impl App {
             buf: None,
             canvas: None,
             atlas: None,
-            model: None,
+            tabs: Vec::new(),
+            active: 0,
+            exec_cmd,
             default_cols,
             default_rows,
             font_size,
@@ -74,9 +92,9 @@ impl App {
             search: None,
             last_match: None,
             needs_render: false,
+            pending_new_tab: false,
             focused: false,
             kbd: None,
-            writer: None,
         }
     }
 
@@ -102,6 +120,73 @@ impl App {
         ((w / cw).max(8), (h / ch).max(2))
     }
 
+    /// Spawn a new tab running the configured command; its reader thread
+    /// sends (tab_index, bytes) on `tx`.
+    fn spawn_tab(&mut self, tx: &mpsc::Sender<(usize, Vec<u8>)>) -> Option<()> {
+        let idx = self.tabs.len();
+        let (cols, rows) = self.cells();
+        let pty_system = NativePtySystem::default();
+        let pair = pty_system
+            .openpty(portable_pty::PtySize {
+                rows: rows as u16,
+                cols: cols as u16,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .ok()?;
+        let spawn = match &self.exec_cmd {
+            Some(sh_line) => {
+                let mut c = CommandBuilder::new("/bin/sh");
+                c.arg("-c");
+                c.arg(sh_line);
+                c
+            }
+            None => CommandBuilder::new_default_prog(),
+        };
+        let child = pair.slave.spawn_command(spawn).ok()?;
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().ok()?;
+        let writer = pair.master.take_writer().ok()?;
+        let tx2 = tx.clone();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = [0u8; 65536];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tx2.send((idx, buf[..n].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        self.tabs.push(Tab {
+            model: TermModel::new(cols, rows),
+            feed: Feed::new(),
+            writer,
+            child,
+            _master: pair.master,
+            title: format!("sh {}", idx + 1),
+        });
+        Some(())
+    }
+
+    fn close_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            RUNNING.store(false, Ordering::Relaxed);
+            return;
+        }
+        let mut t = self.tabs.remove(self.active);
+        let _ = t.child.kill();
+        let _ = t.child.wait();
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len() - 1;
+        }
+        self.needs_render = true;
+    }
+
     fn size_buffers(&mut self) {
         let shm = self
             .session
@@ -119,25 +204,27 @@ impl App {
         let h = (rows * ch) as i32;
         self.buf = Some(ShmBuffer::new(&shm, w, h, &qh));
         self.canvas = Some(Canvas::new(w, h).expect("canvas"));
-        if let Some(m) = self.model.as_mut() {
-            m.grid.resize(cols, rows);
-        } else {
-            self.model = Some(TermModel::new(cols, rows));
+        for t in self.tabs.iter_mut() {
+            t.model.grid.resize(cols, rows);
+            t.model.grid.mark_all_dirty();
         }
         eprintln!("[term] window {cols}x{rows} cells ({w}x{h} px)");
     }
 
-    /// Render if the grid is damaged; true when a commit happened.
+    /// Render if the active grid is damaged; true when a commit happened.
     fn render_if_dirty(&mut self) -> bool {
-        if self.atlas.is_none() || self.canvas.is_none() || self.model.is_none() {
+        if self.atlas.is_none() || self.canvas.is_none() || self.tabs.is_empty() {
             return false;
         }
         let atlas = self.atlas.as_mut().unwrap();
         let canvas = self.canvas.as_ref().unwrap();
-        let model = self.model.as_mut().unwrap();
-        let stats = render_grid(atlas, canvas, &mut model.grid);
-        if stats.rows_drawn == 0 && self.search.is_none() {
+        let tab = self.tabs.get_mut(self.active).unwrap();
+        let stats = render_grid(atlas, canvas, &mut tab.model.grid);
+        if stats.rows_drawn == 0 && self.search.is_none() && self.tabs.len() <= 1 {
             return false;
+        }
+        if self.tabs.len() > 1 {
+            draw_tab_bar(canvas, &self.tab_labels(), self.active);
         }
         if let Some(q) = self.search.as_ref() {
             draw_search_overlay(canvas, q, self.search_matches(q), self.last_match);
@@ -153,9 +240,24 @@ impl App {
         true
     }
 
+    fn tab_labels(&self) -> Vec<String> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| format!("{}: {}", i + 1, t.title))
+            .collect()
+    }
+
     fn dump_grid(&self) {
-        let Some(m) = self.model.as_ref() else { return };
-        println!("=== GRID START === (view -{} rows)", m.grid.view);
+        let Some(m) = self.tabs.get(self.active).map(|t| &t.model) else {
+            return;
+        };
+        println!(
+            "=== GRID START === (tab {} of {}, view -{} rows)",
+            self.active + 1,
+            self.tabs.len(),
+            m.grid.view
+        );
         for y in 0..m.grid.rows() {
             let row: String = (0..m.grid.cols())
                 .map(|x| m.grid.visible_row(y)[x])
@@ -179,18 +281,15 @@ impl App {
         let _ = write!(f, "P6\n{} {}\n255\n", c.width, c.height);
         if let Ok(data) = c.surface_mut().data() {
             for px in data.chunks_exact(4) {
-                // ARGB → RGB
                 let _ = f.write(&[px[2], px[1], px[0]]);
             }
         }
     }
-}
 
-impl App {
-    /// All case-insensitive matches (absolute rows) for `q` across
-    /// history + live grid.
+    /// All case-insensitive matches (absolute rows) for `q` across the
+    /// active tab's history + live grid.
     fn search_matches(&self, q: &str) -> Vec<usize> {
-        let Some(m) = self.model.as_ref() else {
+        let Some(m) = self.tabs.get(self.active).map(|t| &t.model) else {
             return Vec::new();
         };
         let ql = q.to_lowercase();
@@ -217,7 +316,9 @@ impl App {
 
     /// Jump the view so absolute row `a` is the top visible row.
     fn jump_to_row(&mut self, a: usize) {
-        let Some(m) = self.model.as_mut() else { return };
+        let Some(m) = self.tabs.get_mut(self.active).map(|t| &mut t.model) else {
+            return;
+        };
         let hist = m.grid.history_len();
         if a < hist {
             let view = hist - a;
@@ -225,6 +326,33 @@ impl App {
         } else {
             m.grid.scroll_view(-(m.grid.view as i32));
         }
+    }
+}
+
+/// Tab bar strip along the top of the terminal surface.
+fn draw_tab_bar(canvas: &Canvas, labels: &[String], active: usize) {
+    let Ok(cr) = canvas.context() else { return };
+    let w = canvas.width as f64;
+    cr.set_operator(cairo::Operator::Over);
+    cr.set_source_rgba(0.10, 0.11, 0.13, 0.96);
+    cr.rectangle(0.0, 0.0, w, 24.0);
+    let _ = cr.fill();
+    let font = pango::FontDescription::from_string("Sans 10");
+    let mut x = 8.0;
+    for (i, label) in labels.iter().enumerate().take(9) {
+        let (lw, lh) = ibde_ui::canvas::label_size(&cr, label, &font);
+        if i == active {
+            cr.set_source_rgba(0.29, 0.31, 0.35, 1.0);
+            cr.rectangle(x - 4.0, 2.0, lw as f64 + 8.0, 20.0);
+            let _ = cr.fill();
+        }
+        let color = if i == active {
+            (1.0, 1.0, 1.0, 1.0)
+        } else {
+            (0.75, 0.76, 0.79, 1.0)
+        };
+        ibde_ui::canvas::draw_label(&cr, label, &font, x, (24.0 - lh as f64) / 2.0, color);
+        x += lw as f64 + 18.0;
     }
 }
 
@@ -275,18 +403,16 @@ impl SessionHost for App {
             self.size_buffers();
             self.configured = true;
             // Complete every configure cycle immediately: tell the
-            // compositor our geometry and commit a matching buffer
-            // (sway tiles xdg windows and waits for this before mapping).
-            if let (Some(xds), Some(m)) = (&self.xds, self.model.as_ref()) {
+            // compositor our geometry and commit a matching buffer.
+            if let (Some(xds), Some(m)) = (
+                self.xds.as_ref(),
+                self.tabs.get(self.active).map(|t| &t.model),
+            ) {
                 let w = (m.grid.cols() * self.cell_w()) as i32;
                 let h = (m.grid.rows() * self.cell_h()) as i32;
                 xds.set_window_geometry(0, 0, w, h);
             }
-            if let Some(m) = self.model.as_mut() {
-                m.grid.mark_all_dirty();
-            }
             let _ = self.render_if_dirty();
-            // request a frame like every mainstream client does
             if let (Some(sf), Some(qh)) = (&self.surface, &self.qh) {
                 ibde_ui::session::request_frame(sf, self.window_id, qh);
             }
@@ -326,21 +452,48 @@ impl SessionHost for App {
         const KEY_ENTER: u32 = 28;
         const KEY_BACKSPACE: u32 = 14;
         const KEY_F: u32 = 33;
+        const KEY_T: u32 = 20;
+        const KEY_W: u32 = 17;
         const KEY_PGUP: u32 = 104;
         const KEY_PGDN: u32 = 109;
         if !pressed || !self.focused {
             return;
         }
         let Some(k) = self.kbd.as_ref() else { return };
+        // tabs (Ctrl+Shift+T/W, Ctrl+PgUp/PgDn switch)
+        if k.ctrl_held() && k.shift_held() {
+            if keycode == KEY_T {
+                // spawned by the main loop (needs the channel); flag it
+                self.needs_render = true;
+                self.pending_new_tab = true;
+                return;
+            }
+            if keycode == KEY_W {
+                self.close_tab();
+                return;
+            }
+        }
+        if k.ctrl_held() && (keycode == KEY_PGUP || keycode == KEY_PGDN) && self.tabs.len() > 1 {
+            if keycode == KEY_PGDN {
+                self.active = (self.active + 1) % self.tabs.len();
+            } else {
+                self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
+            }
+            if let Some(t) = self.tabs.get_mut(self.active) {
+                t.model.grid.mark_all_dirty();
+            }
+            self.needs_render = true;
+            return;
+        }
         // search: Ctrl+Shift+F opens; while open, keys edit/jump/close
         if self.search.is_some() {
             match keycode {
                 KEY_ESC => {
                     self.search = None;
                     self.last_match = None;
-                    if let Some(m) = self.model.as_mut() {
-                        m.grid.scroll_view(-(m.grid.view as i32));
-                        m.grid.mark_all_dirty();
+                    if let Some(t) = self.tabs.get_mut(self.active) {
+                        t.model.grid.scroll_view(-(t.model.grid.view as i32));
+                        t.model.grid.mark_all_dirty();
                     }
                     self.needs_render = true;
                     return;
@@ -356,8 +509,8 @@ impl SessionHost for App {
                         let target = matches[start];
                         self.last_match = Some(target);
                         self.jump_to_row(target);
-                        if let Some(m) = self.model.as_mut() {
-                            m.grid.mark_all_dirty();
+                        if let Some(t) = self.tabs.get_mut(self.active) {
+                            t.model.grid.mark_all_dirty();
                         }
                         self.needs_render = true;
                     }
@@ -368,8 +521,8 @@ impl SessionHost for App {
                         q.pop();
                     }
                     self.last_match = None;
-                    if let Some(m) = self.model.as_mut() {
-                        m.grid.mark_all_dirty();
+                    if let Some(t) = self.tabs.get_mut(self.active) {
+                        t.model.grid.mark_all_dirty();
                     }
                     self.needs_render = true;
                     return;
@@ -381,8 +534,8 @@ impl SessionHost for App {
                             q.push_str(&ev.utf8);
                         }
                         self.last_match = None;
-                        if let Some(m) = self.model.as_mut() {
-                            m.grid.mark_all_dirty();
+                        if let Some(t) = self.tabs.get_mut(self.active) {
+                            t.model.grid.mark_all_dirty();
                         }
                         self.needs_render = true;
                     }
@@ -396,14 +549,14 @@ impl SessionHost for App {
             self.needs_render = true;
             return;
         }
-        // scrollback: Shift+PageUp/Down (UX-SPEC power layer)
+        // scrollback: Shift+PageUp/Down
         if k.shift_held() && (keycode == KEY_PGUP || keycode == KEY_PGDN) {
-            if let Some(m) = self.model.as_mut() {
-                let step = m.grid.rows() as i32;
+            if let Some(t) = self.tabs.get_mut(self.active) {
+                let step = t.model.grid.rows() as i32;
                 if keycode == KEY_PGUP {
-                    m.grid.scroll_view(step);
+                    t.model.grid.scroll_view(step);
                 } else {
-                    m.grid.scroll_view(-step);
+                    t.model.grid.scroll_view(-step);
                 }
             }
             self.needs_render = true;
@@ -420,10 +573,10 @@ impl SessionHost for App {
         if bytes.is_empty() {
             return;
         }
-        if let Some(w) = self.writer.as_mut() {
+        if let Some(t) = self.tabs.get_mut(self.active) {
             use std::io::Write;
-            let _ = w.write_all(&bytes);
-            let _ = w.flush();
+            let _ = t.writer.write_all(&bytes);
+            let _ = t.writer.flush();
         }
     }
 }
@@ -455,51 +608,11 @@ fn main() {
         }
     }
 
-    // --- PTY ---
-    let pty_system = NativePtySystem::default();
-    let pair = pty_system
-        .openpty(portable_pty::PtySize {
-            rows: rows as u16,
-            cols: cols as u16,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("openpty");
-    let spawn = match &exec_cmd {
-        Some(sh_line) => {
-            let mut c = CommandBuilder::new("/bin/sh");
-            c.arg("-c");
-            c.arg(sh_line);
-            c
-        }
-        None => CommandBuilder::new_default_prog(),
-    };
-    let mut child = pair.slave.spawn_command(spawn).expect("spawn");
-    drop(pair.slave);
-    let mut reader = pair.master.try_clone_reader().expect("pty reader");
-    let mut pty_master = Some(pair.master);
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = [0u8; 65536];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if tx.send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-
-    // --- Wayland ---
     let conn = Connection::connect_to_env().expect("no wayland compositor");
     let mut queue = conn.new_event_queue();
     let qh = queue.handle();
 
-    let mut app = App::new(cols, rows, font_size);
+    let mut app = App::new(exec_cmd, cols, rows, font_size);
     app.conn = Some(conn.clone());
     app.qh = Some(qh.clone());
 
@@ -524,19 +637,14 @@ fn main() {
     queue.roundtrip(&mut app).expect("no window configure");
     assert!(app.configured, "window never configured");
 
-    // keyboard: bound automatically by the session glue when (and only
-    // when) the seat advertises the capability; keymap + keys follow via
-    // SessionHost. Never request one manually — see session.rs note.
-    // PTY writer for keyboard input
-    if let Some(m) = pty_master.as_mut() {
-        app.writer = Some(m.take_writer().expect("pty writer"));
-    }
+    // --- PTY tabs: one channel for all reader threads ---
+    let (tx, rx) = mpsc::channel::<(usize, Vec<u8>)>();
+    app.spawn_tab(&tx).expect("first tab");
 
     // --- Main loop: canonical wayland poll loop + PTY channel ---
     // dispatch_pending alone never READS the socket; without prepare_read
     // + poll + guard.read(), seat capability updates, keymaps and key
     // events silently never arrive (lesson paid for in bench v1).
-    let mut feed = Feed::new();
     let t0 = Instant::now();
     let mut exited = false;
     loop {
@@ -544,12 +652,14 @@ fn main() {
             break;
         }
 
-        // PTY output (drain whatever the reader thread has)
+        // PTY output (drain whatever the reader threads have)
         loop {
             match rx.try_recv() {
-                Ok(bytes) => {
-                    if let Some(m) = app.model.as_mut() {
-                        feed.advance(m, &bytes);
+                Ok((idx, bytes)) => {
+                    if let Some(t) = app.tabs.get_mut(idx) {
+                        t.feed.advance(&mut t.model, &bytes);
+                        // switching to a tab with fresh content repaints it
+                        let _ = idx;
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -565,8 +675,14 @@ fn main() {
             }
         }
 
-        // render requested by event handlers (never render inside the
-        // dispatch callback — requests during dispatch stall the queue)
+        // deferred actions from event handlers (never spawn/render inside
+        // the dispatch callback)
+        if app.pending_new_tab {
+            app.pending_new_tab = false;
+            app.spawn_tab(&tx);
+            app.active = app.tabs.len() - 1;
+            app.needs_render = true;
+        }
         if app.needs_render {
             app.needs_render = false;
             if app.render_if_dirty() {
@@ -603,7 +719,6 @@ fn main() {
         }
 
         if exited {
-            // give the compositor a moment to show the last frame
             std::thread::sleep(Duration::from_millis(300));
             break;
         }
@@ -614,9 +729,10 @@ fn main() {
         if let Ok(p) = std::env::var("IBDE_DUMP_CANVAS") {
             app.dump_canvas_ppm(&p);
         }
-
         println!("SUMMARY exited={} rss_kb={}", exited, rss_kb());
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    for t in app.tabs.iter_mut() {
+        let _ = t.child.kill();
+        let _ = t.child.wait();
+    }
 }
