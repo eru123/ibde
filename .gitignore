@@ -16,3 +16,4 @@ seed/
 .tools/
 deps-prefix/
 bench/vm/id_bench
+bench/vm/ibde-terminal

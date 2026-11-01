@@ -18,6 +18,9 @@ packages:
   - waybar
   - seatd
   - grim
+  - libcairo2
+  - libpangocairo-1.0-0
+  - libxkbcommon0
 write_files:
   - path: /usr/local/bin/ibde-bench-session
     permissions: "0755"
@@ -52,6 +55,26 @@ write_files:
       echo "--- session process count ---"
       ps -e --no-headers | wc -l
       echo "=== end ==="
+      # Optional visual check under labwc: if the seed server also serves
+      # an ibde-terminal binary (host: cp target/release/ibde-terminal
+      # bench/vm/), run it and return a base64 screenshot over serial.
+      if wget -q -O /tmp/ibde-terminal http://10.0.2.2:8123/ibde-terminal; then
+        chmod +x /tmp/ibde-terminal
+        /tmp/ibde-terminal --exec "printf LABWC-VISUAL-OK; echo; cat" \
+          --seconds 8 --cols 50 --rows 10 >/tmp/term.log 2>&1 &
+        sleep 4
+        if grim $HOME/shot.png 2>/tmp/grim.err; then
+          echo "=== LABWC-SHOT-BEGIN ==="
+          base64 -w0 $HOME/shot.png
+          echo
+          echo "=== LABWC-SHOT-END ==="
+        else
+          echo "LABWC-SHOT-FAILED"
+          echo "--- grim.err ---"; cat /tmp/grim.err
+          echo "--- term.log ---"; tail -5 /tmp/term.log
+        fi
+        wait
+      fi
       sleep 1
       sudo -n poweroff
 runcmd:
