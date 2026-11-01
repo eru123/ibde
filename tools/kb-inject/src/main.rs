@@ -229,6 +229,11 @@ fn main() {
             "enter" => 28,
             "up" => 103,
             "down" => 108,
+            "vol-up" => 115,
+            "vol-down" => 114,
+            "mute" => 113,
+            "bright-up" => 233,
+            "bright-down" => 232,
             other => {
                 eprintln!("unknown special {other}");
                 std::process::exit(1);

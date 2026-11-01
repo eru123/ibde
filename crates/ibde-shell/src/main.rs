@@ -88,10 +88,22 @@ struct App {
     spotlight: Option<Module>,
     toast: Option<Module>,
     toast_data: Option<Toast>,
+    osd: Option<Module>,
+    osd_state: Option<Osd>,
+    vol: u8,
+    bright: u8,
     spot_query: String,
     spot_sel: usize,
     spot_apps: Vec<AppEntry>,
     spot_matches: Vec<usize>,
+}
+
+/// On-screen display (volume/brightness) state.
+struct Osd {
+    brightness: bool,
+    level: u8,
+    step: u8, // fade steps remaining: 3=full, 2=full, 1=dim, 0=gone
+    next: Instant,
 }
 
 /// Active toast content.
@@ -201,6 +213,10 @@ impl App {
             spotlight: None,
             toast: None,
             toast_data: None,
+            osd: None,
+            osd_state: None,
+            vol: 65,
+            bright: 80,
             spot_query: String::new(),
             spot_sel: 0,
             spot_apps: Vec::new(),
@@ -219,6 +235,8 @@ impl App {
             self.spotlight.as_mut()
         } else if self.toast.as_ref().is_some_and(|m| m.id == id) {
             self.toast.as_mut()
+        } else if self.osd.as_ref().is_some_and(|m| m.id == id) {
+            self.osd.as_mut()
         } else {
             None
         }
@@ -534,6 +552,75 @@ impl App {
         self.cursor = Some(CursorKit { surface, _buf: buf });
     }
 
+    fn show_osd(&mut self, brightness: bool, level: u8) {
+        if self.osd.is_none() {
+            let Some(session) = self.session.as_mut() else {
+                return;
+            };
+            let Some(qh) = self.qh.clone() else { return };
+            let spec = ibde_ui::session::LayerSpec {
+                namespace: "ibde-osd".into(),
+                layer: ibde_ui::session::Layer::Overlay,
+                anchors: ibde_ui::session::Anchor::Top,
+                width: 344,
+                height: 56,
+                exclusive_zone: 0,
+                margins: (0, 0, 70, 0),
+                keyboard_interactive: false,
+            };
+            match session.create_layer(&spec, &qh) {
+                Some((id, surface, ls)) => {
+                    self.osd = Some(Module {
+                        id,
+                        surface,
+                        ls: Some(ls),
+                        kit: None,
+                    });
+                }
+                None => {
+                    eprintln!("[shell] osd layer unavailable");
+                    return;
+                }
+            }
+        }
+        self.osd_state = Some(Osd {
+            brightness,
+            level,
+            step: 3,
+            next: Instant::now() + Duration::from_millis(500),
+        });
+        self.draw_osd();
+    }
+
+    fn close_osd(&mut self) {
+        self.osd_state = None;
+        if let Some(m) = self.osd.take() {
+            if let Some(ls) = &m.ls {
+                ls.destroy();
+            }
+            if let Some(conn) = &self.conn {
+                let _ = conn.flush();
+            }
+        }
+    }
+
+    fn draw_osd(&mut self) {
+        let Some(id) = self.osd.as_ref().map(|m| m.id) else {
+            return;
+        };
+        let Some(st) = self.osd_state.as_ref() else {
+            return;
+        };
+        let (brightness, level, alpha) = match st.step {
+            3 | 2 => (st.brightness, st.level, 0.98),
+            1 => (st.brightness, st.level, 0.45),
+            _ => return,
+        };
+        self.render_module(id, move |cr, w, h| {
+            draw_osd_content(cr, w, h, brightness, level, alpha)
+        });
+    }
+
     fn show_toast(&mut self, t: Toast) {
         if self.toast.is_none() {
             let Some(session) = self.session.as_mut() else {
@@ -636,10 +723,12 @@ impl SessionHost for App {
         let is_menu = self.menu.as_ref().is_some_and(|m| m.id == id);
         let is_spot = self.spotlight.as_ref().is_some_and(|m| m.id == id);
         let is_toast = self.toast.as_ref().is_some_and(|m| m.id == id);
+        let is_osd = self.osd.as_ref().is_some_and(|m| m.id == id);
         let is_known = is_bar
             || is_menu
             || is_spot
             || is_toast
+            || is_osd
             || self.dock.as_ref().is_some_and(|d| d.id == id);
         if !is_known {
             eprintln!("[shell] configure for unknown surface {id}");
@@ -663,6 +752,8 @@ impl SessionHost for App {
             self.draw_spotlight();
         } else if is_toast {
             self.draw_toast();
+        } else if is_osd {
+            self.draw_osd();
         } else {
             let id2 = id;
             self.render_module(id2, move |cr, w, h| draw_dock_content(cr, w, h, None));
@@ -700,6 +791,41 @@ impl SessionHost for App {
         const KEY_UP: u32 = 103;
         const KEY_DOWN: u32 = 108;
         const KEY_BACKSPACE: u32 = 14;
+
+        // media keys drive the OSD (UX-SPEC §9); bar has keyboard focus
+        const KEY_VOL_DOWN: u32 = 114;
+        const KEY_VOL_UP: u32 = 115;
+        const KEY_MUTE: u32 = 113;
+        const KEY_BRIGHT_DOWN: u32 = 232;
+        const KEY_BRIGHT_UP: u32 = 233;
+        match keycode {
+            KEY_VOL_UP => {
+                self.vol = (self.vol + 7).min(100);
+                self.show_osd(false, self.vol);
+                return;
+            }
+            KEY_VOL_DOWN => {
+                self.vol = self.vol.saturating_sub(7);
+                self.show_osd(false, self.vol);
+                return;
+            }
+            KEY_MUTE => {
+                self.vol = if self.vol == 0 { 65 } else { 0 };
+                self.show_osd(false, self.vol);
+                return;
+            }
+            KEY_BRIGHT_UP => {
+                self.bright = (self.bright + 10).min(100);
+                self.show_osd(true, self.bright);
+                return;
+            }
+            KEY_BRIGHT_DOWN => {
+                self.bright = self.bright.saturating_sub(10);
+                self.show_osd(true, self.bright);
+                return;
+            }
+            _ => {}
+        }
 
         // Ctrl+Space toggles spotlight (Linux default binding, UX-SPEC §4)
         if keycode == KEY_SPACE && k.ctrl_held() {
@@ -985,6 +1111,59 @@ fn fuzzy_score(query: &str, name: &str) -> Option<i32> {
         return None;
     }
     matched_any.then_some(score)
+}
+
+fn draw_osd_content(
+    cr: &cairo::Context,
+    width: i32,
+    height: i32,
+    brightness: bool,
+    level: u8,
+    alpha: f64,
+) {
+    let w = width as f64;
+    let h = height as f64;
+    cr.set_operator(cairo::Operator::Clear);
+    let _ = cr.paint();
+    cr.set_operator(cairo::Operator::Over);
+
+    // dark pill (macOS-style OSD)
+    canvas::fill_rounded_rect(
+        cr,
+        0.0,
+        0.0,
+        w,
+        h,
+        h / 2.0,
+        (0.16, 0.17, 0.20, alpha * 0.92),
+    );
+
+    let glyph = if brightness { "\u{2600}" } else { "\u{266a}" }; // ☀ / ♪
+    let font = {
+        let mut f = pango::FontDescription::from_string("Sans 14");
+        f.set_weight(pango::Weight::Bold);
+        f
+    };
+    let (_gw, gh) = canvas::label_size(cr, glyph, &font);
+    canvas::draw_label(
+        cr,
+        glyph,
+        &font,
+        18.0,
+        (h - gh as f64) / 2.0,
+        (1.0, 1.0, 1.0, alpha),
+    );
+
+    // level track + fill
+    let tx = 52.0;
+    let tw = w - tx - 20.0;
+    let ty = (h - 8.0) / 2.0;
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.25 * alpha);
+    canvas::fill_pill(cr, tx, ty, tw, 8.0, (1.0, 1.0, 1.0, 0.25 * alpha));
+    let fill = tw * (level as f64 / 100.0);
+    if fill > 0.0 {
+        canvas::fill_pill(cr, tx, ty, fill, 8.0, (1.0, 1.0, 1.0, alpha));
+    }
 }
 
 fn draw_toast_content(
@@ -1494,6 +1673,18 @@ fn main() {
             .is_some_and(|t| Instant::now() >= t.expires_at)
         {
             app.close_toast();
+        }
+        // OSD fade: 500ms per step (3,2 = full; 1 = dim; then gone)
+        if let Some(st) = app.osd_state.as_mut() {
+            if Instant::now() >= st.next {
+                if st.step <= 1 {
+                    app.close_osd();
+                } else {
+                    st.step -= 1;
+                    st.next = Instant::now() + Duration::from_millis(500);
+                    app.draw_osd();
+                }
+            }
         }
 
         // canonical wayland poll loop (dispatch_pending alone never
