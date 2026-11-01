@@ -58,3 +58,35 @@ noted.
 Next refinements (bench v1): interactive workout sampling, JSON output,
 PSS accounting (smem-style), unattended-upgrades disabled, RSS-regression
 gate wired into CI.
+
+## Update 2026-11-01: the IBDE session on the floor profile
+
+Same QEMU floor profile (1 vCPU / 512 MB / pixman), labwc, but the
+session is now IBDE itself: `ibde-shell` (menubar + dock) replaces
+waybar, plus a live `ibde-terminal` (60×12) running command output.
+Screenshot: `docs/bench/floor-session.png` — all three elements
+pixel-verified.
+
+| Component | RSS | PSS (marginal) |
+|---|---|---|
+| labwc | 28.3 MB | **20.1 MB** |
+| ibde-shell (bar + dock) | 13.9 MB | **6.4 MB** |
+| ibde-terminal (60×12, live) | 14.6 MB | **6.9 MB** |
+| **DE-own total** | 56.8 MB | **33.4 MB** |
+
+- **ADR-0002 verdict: PASS with 33 % headroom.** The full working
+  desktop — bar, dock, interactive terminal, compositor — costs 33.4 MB
+  PSS against the 50 MB budget (which was set for the DE's own
+  processes; labwc is adopt-phase and trims later per ADR-0003).
+- **vs the stock baseline above**: labwc+waybar was 55.1 MB PSS for a
+  bar and nothing else. IBDE delivers the complete interactive desktop
+  in 61 % of that. waybar alone (36.8 MB) costs 2.9× our entire shell.
+- Session total: **115 MB used of 464 MB** (119 MB with waybar and no
+  terminal) — 350 MB left for the user on the 512 MB floor device.
+- Shell discipline held on the floor CPU: 1 redraw/second (clock tick),
+  dock drew once, terminal drew only on PTY output.
+
+Reproduce: `cp target/release/{ibde-shell,ibde-terminal} bench/vm/ &&
+bench/vm/run-bench.sh` (the measure phase auto-detects the binaries;
+without them it falls back to the waybar baseline above).
+

@@ -38,7 +38,23 @@ write_files:
     content: |
       #!/bin/sh
       # labwc -s runs this; stdout/stderr land on the serial tty.
-      waybar &
+      # When the seed server carries the IBDE binaries (host: cp
+      # target/release/{ibde-shell,ibde-terminal} bench/vm/), run the
+      # real IBDE session instead of waybar (whose floor baseline is
+      # preserved in docs/bench/BASELINE.md).
+      RUN_IBDE=0
+      if wget -q -O /tmp/ibde-shell http://10.0.2.2:8123/ibde-shell \
+         && wget -q -O /tmp/ibde-terminal http://10.0.2.2:8123/ibde-terminal; then
+        chmod +x /tmp/ibde-shell /tmp/ibde-terminal
+        RUN_IBDE=1
+      fi
+      if [ "$RUN_IBDE" = 1 ]; then
+        IBDE_TERMINAL_CMD=/tmp/ibde-terminal /tmp/ibde-shell --seconds 34 >/tmp/shell.log 2>&1 &
+        /tmp/ibde-terminal --exec "printf FLOOR-SESSION-OK; echo; cat" \
+          --seconds 30 --cols 60 --rows 12 >/tmp/term.log 2>&1 &
+      else
+        waybar &
+      fi
       sleep 15
       echo "=== ibde-bench baseline ==="
       date
@@ -52,17 +68,13 @@ write_files:
         pss=$(awk '/^Pss:/ {print $2}' "$p/smaps_rollup" 2>/dev/null) || continue
         [ -n "$pss" ] && echo "$pss $comm"
       done | sort -rn | head -20
+      echo "--- shell.log ---"; tail -2 /tmp/shell.log 2>/dev/null
+      echo "--- term.log ---"; tail -2 /tmp/term.log 2>/dev/null
       echo "--- session process count ---"
       ps -e --no-headers | wc -l
       echo "=== end ==="
-      # Optional visual check under labwc: if the seed server also serves
-      # an ibde-terminal binary (host: cp target/release/ibde-terminal
-      # bench/vm/), run it and return a base64 screenshot over serial.
-      if wget -q -O /tmp/ibde-terminal http://10.0.2.2:8123/ibde-terminal; then
-        chmod +x /tmp/ibde-terminal
-        /tmp/ibde-terminal --exec "printf LABWC-VISUAL-OK; echo; cat" \
-          --seconds 8 --cols 50 --rows 10 >/tmp/term.log 2>&1 &
-        sleep 4
+      if [ "$RUN_IBDE" = 1 ]; then
+        sleep 2
         if grim $HOME/shot.png 2>/tmp/grim.err; then
           echo "=== LABWC-SHOT-BEGIN ==="
           base64 -w0 $HOME/shot.png
@@ -71,7 +83,6 @@ write_files:
         else
           echo "LABWC-SHOT-FAILED"
           echo "--- grim.err ---"; cat /tmp/grim.err
-          echo "--- term.log ---"; tail -5 /tmp/term.log
         fi
         wait
       fi
