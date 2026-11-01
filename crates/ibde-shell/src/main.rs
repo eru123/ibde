@@ -22,6 +22,21 @@ const DOCK_H: i32 = 60;
 /// bottom gap between dock tray and screen edge
 const DOCK_EDGE_GAP: i32 = 10;
 
+/// Dark palette (appearance.mode = dark).
+mod theme_dark {
+    pub const BAR_BG: (f64, f64, f64, f64) = (0.11, 0.11, 0.13, 0.97);
+    pub const HAIRLINE: (f64, f64, f64, f64) = (0.24, 0.24, 0.27, 1.0);
+    pub const ACCENT: (f64, f64, f64, f64) = (0.78, 0.80, 0.84, 1.0);
+    pub const TEXT: (f64, f64, f64, f64) = (0.94, 0.94, 0.96, 1.0);
+    pub const TEXT_MUTED: (f64, f64, f64, f64) = (0.62, 0.62, 0.66, 1.0);
+    pub const ON_ACCENT: (f64, f64, f64, f64) = (0.10, 0.10, 0.12, 1.0);
+    pub const DOCK_BG: (f64, f64, f64, f64) = (0.13, 0.13, 0.15, 0.92);
+    pub const DOCK_FILES: (f64, f64, f64, f64) = (0.30, 0.52, 0.90, 1.0);
+    pub const DOCK_TERM: (f64, f64, f64, f64) = (0.86, 0.86, 0.90, 1.0);
+    pub const DOCK_SETTINGS: (f64, f64, f64, f64) = (0.55, 0.57, 0.62, 1.0);
+    pub const DOCK_TRASH: (f64, f64, f64, f64) = (0.35, 0.35, 0.38, 1.0);
+}
+
 /// Light-theme palette (UX-SPEC §1: Light default, graphite accent).
 mod theme {
     pub const BAR_BG: (f64, f64, f64, f64) = (0.961, 0.961, 0.973, 0.97);
@@ -1099,11 +1114,11 @@ fn draw_bar_content(cr: &cairo::Context, width: i32, height: i32) {
     let _ = cr.paint();
     cr.set_operator(cairo::Operator::Over);
 
-    let (r, g, b, a) = theme::BAR_BG;
+    let (r, g, b, a) = pal().bar_bg;
     cr.set_source_rgba(r, g, b, a);
     cr.rectangle(0.0, 0.0, w, h);
     let _ = cr.fill();
-    let (r, g, b, a) = theme::HAIRLINE;
+    let (r, g, b, a) = pal().hairline;
     cr.set_source_rgba(r, g, b, a);
     cr.rectangle(0.0, h - 1.0, w, 1.0);
     let _ = cr.fill();
@@ -1118,7 +1133,7 @@ fn draw_bar_content(cr: &cairo::Context, width: i32, height: i32) {
     // IBDE menu pill (left)
     let pill_h = 18.0;
     let pill_y = (h - pill_h) / 2.0;
-    canvas::fill_pill(cr, 8.0, pill_y, 44.0, pill_h, theme::ACCENT);
+    canvas::fill_pill(cr, 8.0, pill_y, 44.0, pill_h, pal().accent);
     let (pw, th) = canvas::label_size(cr, "IBDE", &font_semibold);
     canvas::draw_label(
         cr,
@@ -1126,19 +1141,12 @@ fn draw_bar_content(cr: &cairo::Context, width: i32, height: i32) {
         &font_semibold,
         8.0 + (44.0 - pw as f64) / 2.0,
         pill_y + (pill_h - th as f64) / 2.0,
-        theme::ON_ACCENT,
+        pal().on_accent,
     );
 
     // module area placeholder (app name when global menu lands)
     let (_mw, th) = canvas::label_size(cr, "Finder", &font);
-    canvas::draw_label(
-        cr,
-        "Finder",
-        &font,
-        64.0,
-        (h - th as f64) / 2.0,
-        theme::TEXT,
-    );
+    canvas::draw_label(cr, "Finder", &font, 64.0, (h - th as f64) / 2.0, pal().text);
 
     // clock (far right)
     let clock = clock_hm();
@@ -1149,7 +1157,7 @@ fn draw_bar_content(cr: &cairo::Context, width: i32, height: i32) {
         &font,
         w - cw as f64 - 12.0,
         (h - th as f64) / 2.0,
-        theme::TEXT,
+        pal().text,
     );
 
     // muted module hint before the clock
@@ -1161,7 +1169,7 @@ fn draw_bar_content(cr: &cairo::Context, width: i32, height: i32) {
         &font,
         w - cw as f64 - 24.0 - hw as f64,
         (h - hth as f64) / 2.0,
-        theme::TEXT_MUTED,
+        pal().text_muted,
     );
 }
 
@@ -1286,7 +1294,7 @@ fn draw_lock_content(cr: &cairo::Context, width: i32, height: i32, pw: &str) {
         &small,
         (w - _hw as f64) / 2.0,
         h * 0.28 + ch as f64 + 48.0,
-        theme::TEXT_MUTED,
+        pal().text_muted,
     );
     // password dots
     let dots: String = std::iter::repeat_n('\u{2022}', pw.chars().count()).collect();
@@ -1399,7 +1407,7 @@ fn draw_toast_content(
     };
     let body_font = pango::FontDescription::from_string("Sans 11");
 
-    canvas::draw_label(cr, app, &small, 14.0, 8.0, theme::TEXT_MUTED);
+    canvas::draw_label(cr, app, &small, 14.0, 8.0, pal().text_muted);
     let (_sw, sh) = canvas::label_size(cr, summary, &semi);
     canvas::draw_label(
         cr,
@@ -1407,7 +1415,7 @@ fn draw_toast_content(
         &semi,
         14.0,
         24.0 + (18.0 - sh as f64) / 2.0,
-        theme::TEXT,
+        pal().text,
     );
     // body: single line, truncated to card width (wrap comes with the
     // widget tree)
@@ -1418,7 +1426,7 @@ fn draw_toast_content(
         &body_font,
         14.0,
         46.0 + (16.0 - bh as f64) / 2.0,
-        theme::TEXT_MUTED,
+        pal().text_muted,
     );
 }
 
@@ -1487,9 +1495,9 @@ fn draw_spotlight_content(
         query
     };
     let color = if query.is_empty() {
-        theme::TEXT_MUTED
+        pal().text_muted
     } else {
-        theme::TEXT
+        pal().text
     };
     let (_tw, th) = canvas::label_size(cr, shown, &font);
     canvas::draw_label(
@@ -1515,14 +1523,14 @@ fn draw_spotlight_content(
                 cw - 20.0,
                 SPOT_ROW_H - 4.0,
                 7.0,
-                theme::ACCENT,
+                pal().accent,
             );
         }
         let (_tw, rh) = canvas::label_size(cr, name, &row_font);
         let color = if i == sel {
-            theme::ON_ACCENT
+            pal().on_accent
         } else {
-            theme::TEXT
+            pal().text
         };
         canvas::draw_label(
             cr,
@@ -1543,7 +1551,7 @@ fn draw_spotlight_content(
         &hint_font,
         cx + (cw - _hw as f64) / 2.0,
         cy + ch - 22.0 + (14.0 - hh as f64) / 2.0,
-        theme::TEXT_MUTED,
+        pal().text_muted,
     );
 }
 
@@ -1585,7 +1593,7 @@ fn draw_menu_content(cr: &cairo::Context, width: i32, height: i32, hovered: Opti
         f.set_weight(pango::Weight::Semibold);
         f
     };
-    canvas::draw_label(cr, "IBDE", &font_semibold, 14.0, 7.0, theme::TEXT);
+    canvas::draw_label(cr, "IBDE", &font_semibold, 14.0, 7.0, pal().text);
     cr.set_source_rgba(0.88, 0.88, 0.90, 1.0);
     cr.rectangle(8.0, 23.5, w - 16.0, 1.0);
     let _ = cr.fill();
@@ -1610,7 +1618,7 @@ fn draw_menu_content(cr: &cairo::Context, width: i32, height: i32, hovered: Opti
             &font,
             16.0,
             y + (MENU_ROW_H - th as f64) / 2.0,
-            theme::TEXT,
+            pal().text,
         );
     }
 }
@@ -1623,24 +1631,24 @@ fn draw_dock_content(cr: &cairo::Context, width: i32, height: i32, hovered: Opti
     cr.set_operator(cairo::Operator::Over);
 
     // tray
-    canvas::fill_rounded_rect(cr, 0.0, 0.0, w, h, 14.0, theme::DOCK_BG);
+    canvas::fill_rounded_rect(cr, 0.0, 0.0, w, h, 14.0, pal().dock_bg);
 
     let items = [
         DockItem {
             glyph: "F",
-            color: theme::DOCK_FILES,
+            color: pal().dock_files,
         },
         DockItem {
             glyph: ">_",
-            color: theme::DOCK_TERM,
+            color: pal().dock_term,
         },
         DockItem {
             glyph: "S",
-            color: theme::DOCK_SETTINGS,
+            color: pal().dock_settings,
         },
         DockItem {
             glyph: "\u{232b}",
-            color: theme::DOCK_TRASH,
+            color: pal().dock_trash,
         }, // ⌫ trash
     ];
 
@@ -1662,7 +1670,7 @@ fn draw_dock_content(cr: &cairo::Context, width: i32, height: i32, hovered: Opti
             &font,
             x + (icon - gw as f64) / 2.0,
             y + (icon - gh as f64) / 2.0,
-            theme::ON_ACCENT,
+            pal().on_accent,
         );
         if hovered == Some(i) {
             // hover highlight: translucent white overlay + accent dot
@@ -1706,7 +1714,84 @@ fn app_shell_show_toast(app: &mut App, t: Toast) {
     app.show_toast(t);
 }
 
+/// Active appearance (from ~/.config/ibde/ibde.conf or /etc; v0 seam —
+/// startup read of the ADR-0006 keyfile; live D-Bus sync later).
+fn appearance_dark() -> bool {
+    for p in [
+        format!(
+            "{}/.config/ibde/ibde.conf",
+            std::env::var("HOME").unwrap_or_default()
+        ),
+        "/etc/ibde/ibde.conf".to_string(),
+    ] {
+        if let Ok(body) = std::fs::read_to_string(p) {
+            for line in body.lines() {
+                if let Some((k, v)) = line.trim().split_once('=') {
+                    if k.trim() == "appearance.mode" {
+                        return v.trim() == "dark";
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Resolved bar palette for the current appearance.
+struct Palette {
+    bar_bg: (f64, f64, f64, f64),
+    hairline: (f64, f64, f64, f64),
+    accent: (f64, f64, f64, f64),
+    text: (f64, f64, f64, f64),
+    text_muted: (f64, f64, f64, f64),
+    on_accent: (f64, f64, f64, f64),
+    dock_bg: (f64, f64, f64, f64),
+    dock_files: (f64, f64, f64, f64),
+    dock_term: (f64, f64, f64, f64),
+    dock_settings: (f64, f64, f64, f64),
+    dock_trash: (f64, f64, f64, f64),
+}
+
+fn palette() -> Palette {
+    if appearance_dark() {
+        Palette {
+            bar_bg: theme_dark::BAR_BG,
+            hairline: theme_dark::HAIRLINE,
+            accent: theme_dark::ACCENT,
+            text: theme_dark::TEXT,
+            text_muted: theme_dark::TEXT_MUTED,
+            on_accent: theme_dark::ON_ACCENT,
+            dock_bg: theme_dark::DOCK_BG,
+            dock_files: theme_dark::DOCK_FILES,
+            dock_term: theme_dark::DOCK_TERM,
+            dock_settings: theme_dark::DOCK_SETTINGS,
+            dock_trash: theme_dark::DOCK_TRASH,
+        }
+    } else {
+        Palette {
+            bar_bg: pal().bar_bg,
+            hairline: pal().hairline,
+            accent: pal().accent,
+            text: pal().text,
+            text_muted: pal().text_muted,
+            on_accent: pal().on_accent,
+            dock_bg: pal().dock_bg,
+            dock_files: pal().dock_files,
+            dock_term: pal().dock_term,
+            dock_settings: pal().dock_settings,
+            dock_trash: pal().dock_trash,
+        }
+    }
+}
+
+static PAL: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
+
+fn pal() -> &'static Palette {
+    PAL.get_or_init(palette)
+}
+
 fn main() {
+    let _ = pal(); // resolve appearance before first draw
     let mut seconds = 6.0f64;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {

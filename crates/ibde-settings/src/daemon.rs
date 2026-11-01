@@ -17,8 +17,7 @@ fn validate(key: &str, value: &str) -> Result<(), String> {
         },
         "appearance.accent" => {
             const OK: [&str; 9] = [
-                "graphite", "red", "orange", "yellow", "green", "teal",
-                "blue", "purple", "pink",
+                "graphite", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink",
             ];
             if OK.contains(&value) {
                 Ok(())
@@ -40,7 +39,9 @@ fn validate(key: &str, value: &str) -> Result<(), String> {
 }
 
 fn parse_file(path: &PathBuf, out: &mut BTreeMap<String, String>) {
-    let Ok(body) = std::fs::read_to_string(path) else { return };
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return;
+    };
     for line in body.lines() {
         let l = line.trim();
         if l.is_empty() || l.starts_with('#') || l.starts_with('[') {
@@ -56,10 +57,7 @@ fn load_all() -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
     parse_file(&PathBuf::from("/etc/ibde/ibde.conf"), &mut m);
     if let Ok(home) = std::env::var("HOME") {
-        parse_file(
-            &PathBuf::from(home).join(".config/ibde/ibde.conf"),
-            &mut m,
-        );
+        parse_file(&PathBuf::from(home).join(".config/ibde/ibde.conf"), &mut m);
     }
     m
 }
@@ -102,7 +100,6 @@ impl Settings {
         let _ = self.tx.send((key.to_string(), value.to_string()));
         Ok(true)
     }
-
 }
 
 fn main() {
@@ -110,8 +107,7 @@ fn main() {
     let values = load_all();
     eprintln!("[settingsd] {} keys loaded", values.len());
 
-    let conn = zbus::blocking::Connection::session()
-        .expect("no session bus (run under a session)");
+    let conn = zbus::blocking::Connection::session().expect("no session bus (run under a session)");
     let iface = Settings { values, tx };
     conn.object_server()
         .at("/org/ibde/Settings", iface)

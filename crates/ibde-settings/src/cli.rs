@@ -39,8 +39,7 @@ fn main() {
         }
         "list" => {
             use std::collections::BTreeMap;
-            let all: BTreeMap<String, String> =
-                proxy.call("GetAll", &()).unwrap();
+            let all: BTreeMap<String, String> = proxy.call("GetAll", &()).unwrap();
             for (k, v) in all {
                 println!("{k} = {v}");
             }
@@ -49,13 +48,11 @@ fn main() {
             // v0: poll GetAll and print diffs (signal subscription lands
             // with the settings-app wiring)
             use std::collections::BTreeMap;
-            let mut last: BTreeMap<String, String> =
-                proxy.call("GetAll", &()).unwrap();
+            let mut last: BTreeMap<String, String> = proxy.call("GetAll", &()).unwrap();
             println!("(monitoring {} keys — Ctrl-C to stop)", last.len());
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));
-                let now: BTreeMap<String, String> =
-                    proxy.call("GetAll", &()).unwrap();
+                let now: BTreeMap<String, String> = proxy.call("GetAll", &()).unwrap();
                 for (k, v) in &now {
                     if last.get(k) != Some(v) {
                         println!("{k} = {v}");
@@ -65,7 +62,9 @@ fn main() {
             }
         }
         other => {
-            eprintln!("usage: ibde-settings get KEY | set KEY VALUE | list | monitor (got {other:?})");
+            eprintln!(
+                "usage: ibde-settings get KEY | set KEY VALUE | list | monitor (got {other:?})"
+            );
             std::process::exit(1);
         }
     }
