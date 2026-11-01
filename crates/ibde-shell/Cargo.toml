@@ -11,6 +11,7 @@ cairo-rs.workspace = true
 pango.workspace = true
 libc.workspace = true
 
+
 [[bin]]
 name = "ibde-shell"
 path = "src/main.rs"

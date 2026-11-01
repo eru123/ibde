@@ -524,6 +524,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ptr-inject"
+version = "0.1.0"
+dependencies = [
+ "wayland-client",
+ "wayland-protocols-wlr",
+]
+
+[[package]]
 name = "quick-xml"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

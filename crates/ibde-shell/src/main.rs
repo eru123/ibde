@@ -19,7 +19,8 @@ use ibde_ui::stats::{rss_kb, FpsCounter};
 
 const BAR_H: i32 = 28;
 const DOCK_H: i32 = 60;
-const DOCK_GAP: i32 = 10;
+/// bottom gap between dock tray and screen edge
+const DOCK_EDGE_GAP: i32 = 10;
 
 /// Light-theme palette (UX-SPEC §1: Light default, graphite accent).
 mod theme {
@@ -65,6 +66,10 @@ struct App {
     frames: u32,
     fps: FpsCounter,
     t0: Option<Instant>,
+    // pointer/dock state
+    dock_hover: Option<usize>,
+    over_dock: bool,
+    terminal_cmd: String,
 }
 
 impl App {
@@ -78,6 +83,10 @@ impl App {
             frames: 0,
             fps: FpsCounter::new(),
             t0: None,
+            dock_hover: None,
+            over_dock: false,
+            terminal_cmd: std::env::var("IBDE_TERMINAL_CMD")
+                .unwrap_or_else(|_| "ibde-terminal".into()),
         }
     }
 
@@ -113,6 +122,36 @@ impl App {
         let id = self.bar.as_ref().map(|m| m.id).unwrap_or(0);
         self.render_module(id, draw_bar_content);
     }
+
+    fn draw_dock(&mut self) {
+        let id = self.dock.as_ref().map(|m| m.id).unwrap_or(0);
+        let hovered = self.dock_hover;
+        self.render_module(id, move |cr, w, h| draw_dock_content(cr, w, h, hovered));
+    }
+
+    /// Launch the app pinned at dock index 0..2 (trash is a no-op).
+    fn launch(&self, index: usize) {
+        let cmd = match index {
+            0 => "thunar", // Files (present on real installs)
+            1 => &self.terminal_cmd,
+            2 => "ibde-settings",
+            _ => return, // trash / separator
+        };
+        match std::process::Command::new(cmd)
+            .env(
+                "WAYLAND_DISPLAY",
+                std::env::var("WAYLAND_DISPLAY").unwrap_or_default(),
+            )
+            .spawn()
+        {
+            Ok(child) => {
+                eprintln!("[shell] launched {cmd} (pid {})", child.id());
+                // children outlive the handle by design (detached)
+                std::mem::forget(child);
+            }
+            Err(e) => eprintln!("[shell] launch {cmd} failed: {e}"),
+        }
+    }
 }
 
 impl SessionHost for App {
@@ -147,12 +186,52 @@ impl SessionHost for App {
             self.draw_bar();
         } else {
             let id2 = id;
-            self.render_module(id2, draw_dock_content);
+            self.render_module(id2, move |cr, w, h| draw_dock_content(cr, w, h, None));
         }
     }
 
     fn on_layer_closed(&mut self, id: u64) {
         eprintln!("[shell] layer {id} closed");
+    }
+
+    fn on_pointer_enter(&mut self, surface: &WlSurface, sx: f64, sy: f64) {
+        if self.dock.as_ref().is_some_and(|d| &d.surface == surface) {
+            self.over_dock = true;
+            let h = dock_item_at(sx, sy);
+            if h != self.dock_hover {
+                self.dock_hover = h;
+                self.draw_dock();
+            }
+        }
+    }
+
+    fn on_pointer_leave(&mut self, surface: &WlSurface) {
+        if self.dock.as_ref().is_some_and(|d| &d.surface == surface) {
+            self.over_dock = false;
+            if self.dock_hover.take().is_some() {
+                self.draw_dock();
+            }
+        }
+    }
+
+    fn on_pointer_motion(&mut self, sx: f64, sy: f64) {
+        if !self.over_dock {
+            return;
+        }
+        let h = dock_item_at(sx, sy);
+        if h != self.dock_hover {
+            self.dock_hover = h;
+            self.draw_dock();
+        }
+    }
+
+    fn on_pointer_button(&mut self, button: u32, pressed: bool) {
+        const BTN_LEFT: u32 = 0x110;
+        if pressed && button == BTN_LEFT {
+            if let Some(i) = self.dock_hover {
+                self.launch(i);
+            }
+        }
     }
 }
 
@@ -239,7 +318,34 @@ struct DockItem {
 }
 
 /// Draw the dock tray (pure).
-fn draw_dock_content(cr: &cairo::Context, width: i32, height: i32) {
+/// Dock layout constants (shared by draw + hit test).
+const DOCK_ICON: f64 = 42.0;
+const DOCK_GAP: f64 = 10.0;
+const DOCK_PAD: f64 = 9.0;
+const DOCK_SEP_AT: usize = 3; // separator before the trash
+const DOCK_SEP_SPACE: f64 = 15.0; // 1px line with 7px gaps each side
+
+/// X position of dock item `i` (surface-local).
+fn dock_item_x(i: usize) -> f64 {
+    let mut x = DOCK_PAD + i as f64 * (DOCK_ICON + DOCK_GAP);
+    if i >= DOCK_SEP_AT {
+        x += DOCK_SEP_SPACE;
+    }
+    x
+}
+
+/// Which dock item is under surface-local (sx, sy)?
+fn dock_item_at(sx: f64, sy: f64) -> Option<usize> {
+    if sy < 9.0 || sy > 51.0 {
+        return None;
+    }
+    (0..4).find(|&i| {
+        let x = dock_item_x(i);
+        sx >= x && sx <= x + DOCK_ICON
+    })
+}
+
+fn draw_dock_content(cr: &cairo::Context, width: i32, height: i32, hovered: Option<usize>) {
     let w = width as f64;
     let h = height as f64;
     cr.set_operator(cairo::Operator::Clear);
@@ -268,20 +374,15 @@ fn draw_dock_content(cr: &cairo::Context, width: i32, height: i32) {
         }, // ⌫ trash
     ];
 
-    let icon = 42.0;
-    let gap = 10.0;
-    let pad = 9.0;
-    let sep_at = 3; // separator before the trash
-    let sep_space = 1.0 + 2.0 * 7.0; // 1px line with 7px gaps each side
-
+    let icon = DOCK_ICON;
     let font = {
         let mut f = pango::FontDescription::from_string("Sans 13");
         f.set_weight(pango::Weight::Bold);
         f
     };
 
-    let mut x = pad;
     for (i, it) in items.iter().enumerate() {
+        let x = dock_item_x(i);
         let y = (h - icon) / 2.0;
         canvas::fill_rounded_rect(cr, x, y, icon, icon, 10.0, it.color);
         let (gw, gh) = canvas::label_size(cr, it.glyph, &font);
@@ -293,12 +394,15 @@ fn draw_dock_content(cr: &cairo::Context, width: i32, height: i32) {
             y + (icon - gh as f64) / 2.0,
             theme::ON_ACCENT,
         );
-        x += icon + gap;
-        if i + 1 == sep_at {
+        if hovered == Some(i) {
+            // hover highlight: translucent white overlay + accent dot
+            canvas::fill_rounded_rect(cr, x, y, icon, icon, 10.0, (1.0, 1.0, 1.0, 0.28));
+        }
+        if i + 1 == DOCK_SEP_AT {
+            let sx = x + icon + DOCK_GAP;
             cr.set_source_rgba(0.72, 0.72, 0.75, 0.9);
-            cr.rectangle(x + 6.0, 8.0, 1.0, h - 16.0);
+            cr.rectangle(sx + 6.0, 8.0, 1.0, h - 16.0);
             let _ = cr.fill();
-            x += sep_space;
         }
     }
 }
@@ -367,7 +471,7 @@ fn main() {
     });
 
     // module: dock (floating, bottom-center, margin below)
-    let dock_spec = LayerSpec::bottom_dock("ibde-dock", dock_width(), DOCK_H, DOCK_GAP);
+    let dock_spec = LayerSpec::bottom_dock("ibde-dock", dock_width(), DOCK_H, DOCK_EDGE_GAP);
     let (dock_id, dock_surface, _ls) = app
         .session
         .as_mut()
@@ -402,10 +506,11 @@ fn main() {
         if t0.elapsed().as_secs_f64() >= seconds {
             break;
         }
-        match rx.recv_timeout(Duration::from_millis(200)) {
+        // clock tick (non-blocking — wayland events drive everything else)
+        match rx.recv_timeout(Duration::from_millis(0)) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 app.frames += 1;
-                app.draw_bar(); // only the bar ticks; the dock is static
+                app.draw_bar(); // only the bar ticks; the dock is event-driven
                 if let Some((fps, elapsed)) = app.fps.tick() {
                     println!(
                         "STATS redraws_per_s={fps} rss_kb={} t={elapsed:.1}",
@@ -415,12 +520,33 @@ fn main() {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        // canonical wayland poll loop (dispatch_pending alone never
+        // reads the socket — pointer events would never arrive)
         if let Err(e) = queue.dispatch_pending(&mut app) {
             eprintln!("dispatch error: {e}");
             break;
         }
-        if let Some(conn) = &app.conn {
-            let _ = conn.flush();
+        let _ = conn.flush();
+        if let Some(guard) = queue.prepare_read() {
+            use std::os::fd::AsRawFd;
+            let mut fds = [libc::pollfd {
+                fd: guard.connection_fd().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            }];
+            // SAFETY: poll(2) on one valid fd
+            let r = unsafe { libc::poll(fds.as_mut_ptr(), 1, 200) };
+            if r > 0 && (fds[0].revents & libc::POLLIN) != 0 {
+                if let Err(e) = guard.read() {
+                    eprintln!("wayland read error: {e}");
+                    break;
+                }
+                if let Err(e) = queue.dispatch_pending(&mut app) {
+                    eprintln!("dispatch error: {e}");
+                    break;
+                }
+                let _ = conn.flush();
+            }
         }
     }
 

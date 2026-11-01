@@ -31,6 +31,8 @@ pub use wayland_client::protocol::wl_keyboard;
 pub use wayland_client::protocol::wl_keyboard::WlKeyboard;
 pub use wayland_client::protocol::wl_output;
 pub use wayland_client::protocol::wl_output::WlOutput;
+pub use wayland_client::protocol::wl_pointer;
+pub use wayland_client::protocol::wl_pointer::WlPointer;
 pub use wayland_client::protocol::wl_registry;
 pub use wayland_client::protocol::wl_registry::WlRegistry;
 pub use wayland_client::protocol::wl_seat;
@@ -125,6 +127,22 @@ pub trait SessionHost {
     /// wl_keyboard.modifiers payload.
     fn on_modifiers(&mut self, depressed: u32, latched: u32, locked: u32, group: u32) {
         let _ = (depressed, latched, locked, group);
+    }
+    /// Pointer entered one of our surfaces (surface-local coords).
+    fn on_pointer_enter(&mut self, surface: &WlSurface, sx: f64, sy: f64) {
+        let _ = (surface, sx, sy);
+    }
+    /// Pointer left one of our surfaces.
+    fn on_pointer_leave(&mut self, surface: &WlSurface) {
+        let _ = surface;
+    }
+    /// Pointer motion (surface-local coords of the entered surface).
+    fn on_pointer_motion(&mut self, sx: f64, sy: f64) {
+        let _ = (sx, sy);
+    }
+    /// Pointer button (evdev code; e.g. BTN_LEFT = 0x110).
+    fn on_pointer_button(&mut self, button: u32, pressed: bool) {
+        let _ = (button, pressed);
     }
     /// Frame callback for a surface: render, commit, re-request.
     fn on_frame(&mut self, surface_id: u64) {
@@ -550,6 +568,9 @@ macro_rules! delegate_ibde_session {
                         if caps.contains(Capability::Keyboard) {
                             let _ = seat.get_keyboard(qh, ());
                         }
+                        if caps.contains(Capability::Pointer) {
+                            let _ = seat.get_pointer(qh, ());
+                        }
                     }
                 }
                 let _ = state;
@@ -596,6 +617,47 @@ macro_rules! delegate_ibde_session {
                         ..
                     } => {
                         state.on_modifiers(mods_depressed, mods_latched, mods_locked, group);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        impl $crate::session::Dispatch<$crate::session::WlPointer, ()> for $app {
+            fn event(
+                state: &mut Self,
+                _p: &$crate::session::WlPointer,
+                event: $crate::session::wl_pointer::Event,
+                _data: &(),
+                _conn: &$crate::session::Connection,
+                _qh: &$crate::session::QueueHandle<Self>,
+            ) {
+                use $crate::session::wl_pointer::{ButtonState, Event};
+                match event {
+                    Event::Enter {
+                        surface,
+                        surface_x,
+                        surface_y,
+                        ..
+                    } => {
+                        state.on_pointer_enter(&surface, surface_x, surface_y);
+                    }
+                    Event::Leave { surface, .. } => {
+                        state.on_pointer_leave(&surface);
+                    }
+                    Event::Motion {
+                        surface_x,
+                        surface_y,
+                        ..
+                    } => {
+                        state.on_pointer_motion(surface_x, surface_y);
+                    }
+                    Event::Button {
+                        button, state: bs, ..
+                    } => {
+                        let pressed =
+                            matches!(bs, $crate::session::WEnum::Value(ButtonState::Pressed));
+                        state.on_pointer_button(button, pressed);
                     }
                     _ => {}
                 }

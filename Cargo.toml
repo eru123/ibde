@@ -6,6 +6,7 @@ members = [
     "crates/ibde-shell",
     "ui/spike-rs",
     "tools/kb-inject",
+    "tools/ptr-inject",
 ]
 
 [workspace.package]
