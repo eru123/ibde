@@ -8,8 +8,8 @@ execution with parallel agent workstreams; critical path: bench →
 
 | Phase | Time | Delivers | Exit gate |
 |---|---|---|---|
-| **0 Foundations** | 2 wks | repo, CI, contracts, `ibde-bench` floor profile, labwc baseline numbers, `libibde-ui` spike | nightly bench publishing; go/no-go on toolkit bet |
-| **1 Shell skeleton + flagship terminal** | 6 wks | `libibde-ui` core, shell v0 (bar, dock, launcher), keymap engine (inert — Linux default), **`ibde-terminal` v1** | v0.1 internal alpha; floor bench ≤ 60 MB with written path to 50 |
+| **0 Foundations** | 2 wks | repo, CI, contracts, `ibde-bench` floor profile, labwc baseline numbers, `libibde-ui` spike | nightly bench publishing; go/no-go on toolkit bet — **DONE** |
+| **1 Shell skeleton + flagship terminal** | 6 wks | `libibde-ui` core, shell v0 (bar, dock, launcher), keymap engine (inert — Linux default), **`ibde-terminal` v1** | v0.1 internal alpha; floor bench ≤ 60 MB — **DONE at 33.4 MB PSS, tagged v0.1 (see docs/reviews/PHASE1-EXIT.md)** |
 | **2 macOS-spec shell** | 6–8 wks | global menu, notifications, OSD, lock screen, control center, settingsd + Settings app, theme/icon/wallpaper v1, Welcome, first `.deb`s + apt repo | v0.5 public alpha (Debian 13 amd64/arm64) |
 | **3 Own compositor + images** | 6–8 wks | `ibde-comp` fork (animations, overview, menubar auto-reveal, screenshots), `ibde-greeter`, Pi image (pi-gen), x86 ISO | v0.9 beta images booting on floor hardware |
 | **4 Hardening → 1.0** | 4–6 wks | watchdog/soak hardening, full keyboard nav, i18n, docs site, a11y pass | 1.0 |
