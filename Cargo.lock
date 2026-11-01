@@ -304,6 +304,7 @@ name = "ibde-terminal"
 version = "0.1.0"
 dependencies = [
  "ibde-ui",
+ "libc",
  "portable-pty",
  "vte",
 ]
@@ -340,6 +341,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f7970510895cee30b3e9128319f2cefd4bde883a39f38baa279567ba3a7eb97d"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "kb-inject"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-scanner",
+ "xkbcommon",
 ]
 
 [[package]]

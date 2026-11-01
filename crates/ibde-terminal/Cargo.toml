@@ -9,6 +9,7 @@ license.workspace = true
 ibde-ui.workspace = true
 vte.workspace = true
 portable-pty.workspace = true
+libc.workspace = true
 
 [[bin]]
 name = "ibde-terminal"

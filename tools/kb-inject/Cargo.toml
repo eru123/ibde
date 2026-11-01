@@ -1,0 +1,13 @@
+[package]
+name = "kb-inject"
+description = "Bench tool: inject typed text via zwp_virtual_keyboard_v1 (interactive workout driver)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wayland-client.workspace = true
+wayland-backend = "0.3"
+wayland-scanner = "0.31"
+xkbcommon.workspace = true
+libc.workspace = true

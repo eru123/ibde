@@ -246,6 +246,12 @@ impl SessionHost for App {
         }
         let Some(k) = self.kbd.as_ref() else { return };
         let ev = k.translate(keycode + 8);
+        if std::env::var_os("IBDE_DEBUG_KEYS").is_some() {
+            eprintln!(
+                "[key] code={keycode} sym={:#x} utf8={:?}",
+                ev.keysym, ev.utf8
+            );
+        }
         let bytes = ibde_ui::input::key_to_terminal_bytes(&ev);
         if bytes.is_empty() {
             return;
@@ -362,7 +368,10 @@ fn main() {
         app.writer = Some(m.take_writer().expect("pty writer"));
     }
 
-    // --- Main loop: PTY channel + wayland, poll-free via recv_timeout ---
+    // --- Main loop: canonical wayland poll loop + PTY channel ---
+    // dispatch_pending alone never READS the socket; without prepare_read
+    // + poll + guard.read(), seat capability updates, keymaps and key
+    // events silently never arrive (lesson paid for in bench v1).
     let mut feed = Feed::new();
     let t0 = Instant::now();
     let mut exited = false;
@@ -370,21 +379,20 @@ fn main() {
         if !RUNNING.load(Ordering::Relaxed) || t0.elapsed().as_secs_f64() >= seconds {
             break;
         }
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(bytes) => {
-                if let Some(m) = app.model.as_mut() {
-                    feed.advance(m, &bytes);
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // drain remaining then finish
-                while let Ok(bytes) = rx.try_recv() {
+
+        // PTY output (drain whatever the reader thread has)
+        loop {
+            match rx.try_recv() {
+                Ok(bytes) => {
                     if let Some(m) = app.model.as_mut() {
                         feed.advance(m, &bytes);
                     }
                 }
-                exited = true;
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    exited = true;
+                    break;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
             }
         }
         if app.render_if_dirty() {
@@ -392,13 +400,35 @@ fn main() {
                 let _ = c.flush();
             }
         }
+
+        // Wayland events
         if let Err(e) = queue.dispatch_pending(&mut app) {
             eprintln!("dispatch error: {e}");
             break;
         }
-        if let Some(c) = &app.conn {
-            let _ = c.flush();
+        let _ = conn.flush();
+        if let Some(guard) = queue.prepare_read() {
+            use std::os::fd::AsRawFd;
+            let mut fds = [libc::pollfd {
+                fd: guard.connection_fd().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            }];
+            // SAFETY: poll(2) on our own valid fd list
+            let r = unsafe { libc::poll(fds.as_mut_ptr(), 1, 50) };
+            if r > 0 && (fds[0].revents & libc::POLLIN) != 0 {
+                if let Err(e) = guard.read() {
+                    eprintln!("wayland read error: {e}");
+                    break;
+                }
+                if let Err(e) = queue.dispatch_pending(&mut app) {
+                    eprintln!("dispatch error: {e}");
+                    break;
+                }
+                let _ = conn.flush();
+            }
         }
+
         if exited {
             // give the compositor a moment to show the last frame
             std::thread::sleep(Duration::from_millis(300));
