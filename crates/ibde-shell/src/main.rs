@@ -1769,17 +1769,17 @@ fn palette() -> Palette {
         }
     } else {
         Palette {
-            bar_bg: pal().bar_bg,
-            hairline: pal().hairline,
-            accent: pal().accent,
-            text: pal().text,
-            text_muted: pal().text_muted,
-            on_accent: pal().on_accent,
-            dock_bg: pal().dock_bg,
-            dock_files: pal().dock_files,
-            dock_term: pal().dock_term,
-            dock_settings: pal().dock_settings,
-            dock_trash: pal().dock_trash,
+            bar_bg: theme::BAR_BG,
+            hairline: theme::HAIRLINE,
+            accent: theme::ACCENT,
+            text: theme::TEXT,
+            text_muted: theme::TEXT_MUTED,
+            on_accent: theme::ON_ACCENT,
+            dock_bg: theme::DOCK_BG,
+            dock_files: theme::DOCK_FILES,
+            dock_term: theme::DOCK_TERM,
+            dock_settings: theme::DOCK_SETTINGS,
+            dock_trash: theme::DOCK_TRASH,
         }
     }
 }

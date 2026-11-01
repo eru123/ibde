@@ -18,7 +18,8 @@ fn main() {
     match cmd.as_str() {
         "get" => {
             let key = args.next().expect("get KEY");
-            match proxy.call::<String, _>("Get", &(&key,)) {
+            let r: zbus::Result<String> = proxy.call("Get", &(&key,));
+            match r {
                 Ok(v) => println!("{v}"),
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -29,7 +30,8 @@ fn main() {
         "set" => {
             let key = args.next().expect("set KEY VALUE");
             let value = args.next().expect("set KEY VALUE");
-            match proxy.call::<bool, _>("Set", &(&key, &value)) {
+            let r: zbus::Result<bool> = proxy.call("Set", &(&key, &value));
+            match r {
                 Ok(_) => println!("ok"),
                 Err(e) => {
                     eprintln!("error: {e}");
