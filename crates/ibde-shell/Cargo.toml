@@ -16,3 +16,21 @@ zbus.workspace = true
 [[bin]]
 name = "ibde-shell"
 path = "src/main.rs"
+
+[package.metadata.deb]
+maintainer = "IBDE project <jericho@skiddph.com>"
+copyright = "2026, IBDE project"
+extended-description = """The IBDE shell: menubar, dock, IBDE menu, Spotlight launcher and the
+notifications daemon in a single process — 'The familiar feel,
+brought into Linux.' Designed for floor hardware (512MB-class) with a
+strict no-heavy-toolkits policy in the session-critical path."""
+depends = "libcairo2, libpangocairo-1.0-0, libwayland-client0, libxkbcommon0, libc6"
+recommends = "labwc, ibde-terminal"
+section = "x11"
+priority = "optional"
+assets = [
+    ["target/release/ibde-shell", "usr/bin/ibde-shell", "755"],
+    ["../../packaging/ibde-session", "usr/bin/", "755"],
+    ["../../packaging/ibde.desktop", "usr/share/wayland-sessions/", "644"],
+]
+

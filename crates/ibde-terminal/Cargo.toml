@@ -14,3 +14,14 @@ libc.workspace = true
 [[bin]]
 name = "ibde-terminal"
 path = "src/bin/ibde-terminal.rs"
+
+[package.metadata.deb]
+maintainer = "IBDE project <jericho@skiddph.com>"
+copyright = "2026, IBDE project"
+extended-description = """The IBDE flagship terminal: vte-based emulation rendered through the
+ibde-ui text-grid fast path (glyph atlas, damage tracking) — built for
+floor hardware where VTE+GTK is not affordable."""
+depends = "libcairo2, libpangocairo-1.0-0, libwayland-client0, libxkbcommon0, libc6"
+section = "x11"
+priority = "optional"
+

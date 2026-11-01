@@ -1,0 +1,12 @@
+#!/bin/sh
+# IBDE session entry point — launched by a Wayland-capable session
+# manager (greetd, SDDM, or a login shell). Starts the compositor with
+# the IBDE shell as its session client.
+#
+# IBDE is compositor-agnostic (ADR-0003): labwc is the Phase-1/2
+# default; set IBDE_COMPOSITOR to override.
+set -e
+COMPOSITOR="${IBDE_COMPOSITOR:-labwc}"
+export XKB_DEFAULT_LAYOUT="${XKB_DEFAULT_LAYOUT:-us}"
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-IBDE}"
+exec "$COMPOSITOR" -s ibde-shell

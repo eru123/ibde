@@ -18,3 +18,4 @@ deps-prefix/
 bench/vm/id_bench
 bench/vm/ibde-terminal
 bench/vm/ibde-shell
+target/debian/

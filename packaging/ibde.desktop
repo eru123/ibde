@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=IBDE
+Comment=The familiar feel, brought into Linux
+Exec=ibde-session
+Type=Application
+DesktopNames=IBDE
+Keywords=wayland;session;desktop;
