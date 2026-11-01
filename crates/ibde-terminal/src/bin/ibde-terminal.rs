@@ -322,6 +322,9 @@ impl SessionHost for App {
     }
 
     fn on_key(&mut self, keycode: u32, pressed: bool) {
+        const KEY_ESC: u32 = 1;
+        const KEY_ENTER: u32 = 28;
+        const KEY_BACKSPACE: u32 = 14;
         const KEY_F: u32 = 33;
         const KEY_PGUP: u32 = 104;
         const KEY_PGDN: u32 = 109;
