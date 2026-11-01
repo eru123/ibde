@@ -4,7 +4,8 @@
 # Strategy: EXTRACT arm64 .debs into a sysroot (installing :arm64 dev
 # packages conflicts with the amd64 ones — apt exit 100).
 FROM debian:trixie
-RUN apt-get update -qq \
+RUN dpkg --add-architecture arm64 \
+    && apt-get update -qq \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
        build-essential crossbuild-essential-arm64 pkg-config curl ca-certificates \
        devscripts \

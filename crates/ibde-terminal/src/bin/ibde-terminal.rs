@@ -280,7 +280,7 @@ impl App {
         let mut f = std::io::BufWriter::new(f);
         let _ = write!(f, "P6\n{} {}\n255\n", c.width, c.height);
         if let Ok(data) = c.surface_mut().data() {
-            for px in data.chunks_exact(4) {
+            for px in data.as_chunks::<4>().0 {
                 let _ = f.write(&[px[2], px[1], px[0]]);
             }
         }
