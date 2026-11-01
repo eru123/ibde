@@ -675,6 +675,13 @@ impl App {
         let _ = self.conn.as_ref().map(|c| c.flush());
     }
 
+    /// Verify `password` against the system PAM stack (pam_unix: root
+    /// reads shadow directly; non-root delegates to unix_chkpwd).
+    fn auth_ok(password: &str) -> bool {
+        let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
+        pam::authenticate("ibde-lock", &user, password)
+    }
+
     fn unlock_session(&mut self) {
         if let Some(lock) = self.lock_obj.take() {
             lock.unlock_and_destroy();
@@ -927,9 +934,14 @@ impl SessionHost for App {
             const KEY_ENTER: u32 = 28;
             const KEY_BACKSPACE: u32 = 14;
             if keycode == KEY_ENTER {
-                // v0 skeleton: NO AUTH — any password unlocks. Real PAM
-                // integration is a Phase-3 item (ADR ladder).
-                self.unlock_session();
+                if Self::auth_ok(&self.lock_pw.clone()) {
+                    eprintln!("[shell] auth ok — unlocking");
+                    self.unlock_session();
+                } else {
+                    eprintln!("[shell] auth failed");
+                    self.lock_pw.clear();
+                    self.draw_lock();
+                }
             } else if keycode == KEY_BACKSPACE {
                 self.lock_pw.pop();
                 self.draw_lock();
@@ -1103,6 +1115,8 @@ impl SessionHost for App {
         }
     }
 }
+
+mod pam;
 
 ibde_ui::delegate_ibde_session!(App);
 
