@@ -336,7 +336,7 @@ fn dock_item_x(i: usize) -> f64 {
 
 /// Which dock item is under surface-local (sx, sy)?
 fn dock_item_at(sx: f64, sy: f64) -> Option<usize> {
-    if sy < 9.0 || sy > 51.0 {
+    if !(9.0..=51.0).contains(&sy) {
         return None;
     }
     (0..4).find(|&i| {
