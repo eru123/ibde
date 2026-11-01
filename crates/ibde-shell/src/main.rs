@@ -48,6 +48,7 @@ struct Kit {
 struct Module {
     id: u64,
     surface: WlSurface,
+    ls: Option<ibde_ui::session::ZwlrLayerSurfaceV1>,
     kit: Option<Kit>,
 }
 
@@ -57,18 +58,30 @@ impl Module {
     }
 }
 
+/// A tiny hand-drawn cursor surface (no cursor-theme dependency).
+struct CursorKit {
+    surface: WlSurface,
+    _buf: ShmBuffer,
+}
+
 struct App {
     session: Option<Session>,
     conn: Option<Connection>,
     qh: Option<QueueHandle<Self>>,
     bar: Option<Module>,
     dock: Option<Module>,
+    menu: Option<Module>,
+    cursor: Option<CursorKit>,
     frames: u32,
     fps: FpsCounter,
     t0: Option<Instant>,
     // pointer/dock state
     dock_hover: Option<usize>,
     over_dock: bool,
+    over_bar: bool,
+    over_pill: bool,
+    menu_hover: Option<usize>,
+    over_menu: bool,
     terminal_cmd: String,
 }
 
@@ -80,11 +93,17 @@ impl App {
             qh: None,
             bar: None,
             dock: None,
+            menu: None,
+            cursor: None,
             frames: 0,
             fps: FpsCounter::new(),
             t0: None,
             dock_hover: None,
             over_dock: false,
+            over_bar: false,
+            over_pill: false,
+            menu_hover: None,
+            over_menu: false,
             terminal_cmd: std::env::var("IBDE_TERMINAL_CMD")
                 .unwrap_or_else(|_| "ibde-terminal".into()),
         }
@@ -95,6 +114,8 @@ impl App {
             self.bar.as_mut()
         } else if self.dock.as_ref().is_some_and(|m| m.id == id) {
             self.dock.as_mut()
+        } else if self.menu.as_ref().is_some_and(|m| m.id == id) {
+            self.menu.as_mut()
         } else {
             None
         }
@@ -127,6 +148,101 @@ impl App {
         let id = self.dock.as_ref().map(|m| m.id).unwrap_or(0);
         let hovered = self.dock_hover;
         self.render_module(id, move |cr, w, h| draw_dock_content(cr, w, h, hovered));
+    }
+
+    fn draw_menu(&mut self) {
+        let Some(id) = self.menu.as_ref().map(|m| m.id) else { return };
+        let hovered = self.menu_hover;
+        self.render_module(id, move |cr, w, h| draw_menu_content(cr, w, h, hovered));
+    }
+
+    fn open_menu(&mut self) {
+        if self.menu.is_some() {
+            return;
+        }
+        let Some(session) = self.session.as_mut() else { return };
+        let Some(qh) = self.qh.clone() else { return };
+        // popover below the IBDE pill (top-left), above everything else
+        let spec = ibde_ui::session::LayerSpec {
+            namespace: "ibde-menu".into(),
+            layer: ibde_ui::session::Layer::Top,
+            anchors: ibde_ui::session::Anchor::Top | ibde_ui::session::Anchor::Left,
+            width: MENU_W,
+            height: MENU_H,
+            exclusive_zone: 0,
+            margins: (8, 0, BAR_H + 4, 0),
+        };
+        match session.create_layer(&spec, &qh) {
+            Some((id, surface, ls)) => {
+                self.menu = Some(Module { id, surface, ls: Some(ls), kit: None });
+            }
+            None => eprintln!("[shell] menu layer unavailable"),
+        }
+    }
+
+    fn close_menu(&mut self) {
+        if let Some(m) = self.menu.take() {
+            if let Some(ls) = &m.ls {
+                ls.destroy();
+            }
+            self.menu_hover = None;
+            self.over_menu = false;
+            if let Some(conn) = &self.conn {
+                let _ = conn.flush();
+            }
+        }
+    }
+
+    /// Our 12×18 arrow cursor on the entered surface.
+    fn set_cursor(&self, serial: u32) {
+        let (Some(cursor), Some(pointer)) = (
+            self.cursor.as_ref(),
+            self.session.as_ref().and_then(|s| s.pointer.clone()),
+        ) else {
+            return;
+        };
+        pointer.set_cursor(serial, Some(&cursor.surface), 0, 0);
+        if let Some(conn) = &self.conn {
+            let _ = conn.flush();
+        }
+    }
+
+    fn build_cursor(&mut self) {
+        let (Some(session), Some(qh)) = (self.session.as_ref(), self.qh.clone()) else {
+            return;
+        };
+        let Some(shm) = session.shm.clone() else { return };
+        let Some(compositor) = session.compositor.clone() else { return };
+        let surface = compositor.create_surface(&qh, ());
+        let mut buf = ShmBuffer::new(&shm, 12, 18, &qh);
+        {
+            let cs = Canvas::new(12, 18).expect("cursor canvas");
+            {
+                let cr = cs.context().unwrap();
+                // classic arrow: white fill, graphite outline
+                cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+                cr.move_to(1.0, 1.0);
+                cr.line_to(1.0, 13.0);
+                cr.line_to(4.5, 9.8);
+                cr.line_to(7.0, 15.0);
+                cr.line_to(9.0, 14.0);
+                cr.line_to(6.6, 9.0);
+                cr.line_to(11.0, 9.0);
+                cr.close_path();
+                cr.fill_preserve().unwrap();
+                cr.set_source_rgba(0.15, 0.16, 0.19, 1.0);
+                let _ = cr.stroke();
+            }
+            let mut cs = cs;
+            cs.copy_to(&mut buf);
+        }
+        surface.attach(Some(buf.wayland_buffer()), 0, 0);
+        surface.damage_buffer(0, 0, 12, 18);
+        surface.commit();
+        if let Some(conn) = &self.conn {
+            let _ = conn.flush();
+        }
+        self.cursor = Some(CursorKit { surface, _buf: buf });
     }
 
     /// Launch the app pinned at dock index 0..2 (trash is a no-op).
@@ -167,7 +283,10 @@ impl SessionHost for App {
             .expect("configure without shm");
         let qh = self.qh.clone().expect("configure without qh");
         let is_bar = self.bar.as_ref().is_some_and(|b| b.id == id);
-        let is_known = is_bar || self.dock.as_ref().is_some_and(|d| d.id == id);
+        let is_menu = self.menu.as_ref().is_some_and(|m| m.id == id);
+        let is_known = is_bar
+            || is_menu
+            || self.dock.as_ref().is_some_and(|d| d.id == id);
         if !is_known {
             eprintln!("[shell] configure for unknown surface {id}");
             return;
@@ -184,6 +303,8 @@ impl SessionHost for App {
         self.t0.get_or_insert_with(Instant::now);
         if is_bar {
             self.draw_bar();
+        } else if is_menu {
+            self.draw_menu();
         } else {
             let id2 = id;
             self.render_module(id2, move |cr, w, h| draw_dock_content(cr, w, h, None));
@@ -192,15 +313,35 @@ impl SessionHost for App {
 
     fn on_layer_closed(&mut self, id: u64) {
         eprintln!("[shell] layer {id} closed");
+        if self.menu.as_ref().is_some_and(|m| m.id == id) {
+            self.menu = None;
+        }
     }
 
-    fn on_pointer_enter(&mut self, surface: &WlSurface, sx: f64, sy: f64) {
+    fn on_pointer_enter(
+        &mut self,
+        surface: &WlSurface,
+        serial: u32,
+        sx: f64,
+        sy: f64,
+    ) {
+        self.set_cursor(serial);
         if self.dock.as_ref().is_some_and(|d| &d.surface == surface) {
             self.over_dock = true;
             let h = dock_item_at(sx, sy);
             if h != self.dock_hover {
                 self.dock_hover = h;
                 self.draw_dock();
+            }
+        } else if self.bar.as_ref().is_some_and(|b| &b.surface == surface) {
+            self.over_bar = true;
+            self.over_pill = bar_pill_at(sx, sy);
+        } else if self.menu.as_ref().is_some_and(|m| &m.surface == surface) {
+            self.over_menu = true;
+            let h = menu_item_at(sx, sy);
+            if h != self.menu_hover {
+                self.menu_hover = h;
+                self.draw_menu();
             }
         }
     }
@@ -215,22 +356,56 @@ impl SessionHost for App {
     }
 
     fn on_pointer_motion(&mut self, sx: f64, sy: f64) {
-        if !self.over_dock {
-            return;
-        }
-        let h = dock_item_at(sx, sy);
-        if h != self.dock_hover {
-            self.dock_hover = h;
-            self.draw_dock();
+        if self.over_dock {
+            let h = dock_item_at(sx, sy);
+            if h != self.dock_hover {
+                self.dock_hover = h;
+                self.draw_dock();
+            }
+        } else if self.over_bar {
+            self.over_pill = bar_pill_at(sx, sy);
+        } else if self.over_menu {
+            let h = menu_item_at(sx, sy);
+            if h != self.menu_hover {
+                self.menu_hover = h;
+                self.draw_menu();
+            }
         }
     }
 
     fn on_pointer_button(&mut self, button: u32, pressed: bool) {
         const BTN_LEFT: u32 = 0x110;
-        if pressed && button == BTN_LEFT {
-            if let Some(i) = self.dock_hover {
-                self.launch(i);
+        if !pressed || button != BTN_LEFT {
+            return;
+        }
+        if self.over_menu {
+            match self.menu_hover {
+                Some(0) => {
+                    // About This Machine (v0: close; panel arrives later)
+                    self.close_menu();
+                }
+                Some(1) => {
+                    eprintln!("[shell] quit requested from IBDE menu");
+                    std::process::exit(0);
+                }
+                _ => {}
             }
+            return;
+        }
+        if self.over_bar {
+            if self.over_pill {
+                if self.menu.is_some() {
+                    self.close_menu();
+                } else {
+                    self.open_menu();
+                }
+            } else if self.menu.is_some() {
+                self.close_menu(); // click-away on the bar
+            }
+            return;
+        }
+        if let Some(i) = self.dock_hover {
+            self.launch(i);
         }
     }
 }
@@ -343,6 +518,73 @@ fn dock_item_at(sx: f64, sy: f64) -> Option<usize> {
         let x = dock_item_x(i);
         sx >= x && sx <= x + DOCK_ICON
     })
+}
+
+/// Is (sx, sy) on the IBDE pill? (bar surface-local; matches draw)
+fn bar_pill_at(sx: f64, sy: f64) -> bool {
+    (8.0..=52.0).contains(&sx) && (5.0..=23.0).contains(&sy)
+}
+
+/// IBDE menu rows.
+const MENU_ROWS: [&str; 2] = ["About This Machine", "Quit IBDE"];
+const MENU_W: i32 = 208;
+const MENU_H: i32 = 96;
+const MENU_ROW_H: f64 = 34.0;
+
+fn menu_item_at(sx: f64, sy: f64) -> Option<usize> {
+    if sx < 0.0 || sx > MENU_W as f64 || sy < 24.0 {
+        return None;
+    }
+    let i = ((sy - 24.0) / MENU_ROW_H) as usize;
+    (i < MENU_ROWS.len()).then_some(i)
+}
+
+fn draw_menu_content(cr: &cairo::Context, width: i32, height: i32, hovered: Option<usize>) {
+    let w = width as f64;
+    let h = height as f64;
+    cr.set_operator(cairo::Operator::Clear);
+    let _ = cr.paint();
+    cr.set_operator(cairo::Operator::Over);
+
+    // popover card
+    canvas::fill_rounded_rect(cr, 0.0, 0.0, w, h, 10.0, (1.0, 1.0, 1.0, 0.97));
+    cr.set_source_rgba(0.85, 0.85, 0.87, 1.0);
+    cr.set_line_width(1.0);
+    cr.new_path();
+    cr.arc(10.0, 10.0, 9.5, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+    cr.arc(w - 10.0, 10.0, 9.5, -0.5 * std::f64::consts::PI, 0.0);
+    cr.arc(w - 10.0, h - 10.0, 9.5, 0.0, 0.5 * std::f64::consts::PI);
+    cr.arc(10.0, h - 10.0, 9.5, 0.5 * std::f64::consts::PI, std::f64::consts::PI);
+    cr.close_path();
+    let _ = cr.stroke();
+
+    let font = pango::FontDescription::from_string("Sans 11");
+    // header
+    let font_semibold = {
+        let mut f = pango::FontDescription::from_string("Sans 11");
+        f.set_weight(pango::Weight::Semibold);
+        f
+    };
+    canvas::draw_label(
+        cr,
+        "IBDE",
+        &font_semibold,
+        14.0,
+        7.0,
+        theme::TEXT,
+    );
+    cr.set_source_rgba(0.88, 0.88, 0.90, 1.0);
+    cr.rectangle(8.0, 23.5, w - 16.0, 1.0);
+    let _ = cr.fill();
+
+    for (i, row) in MENU_ROWS.iter().enumerate() {
+        let y = 24.0 + i as f64 * MENU_ROW_H;
+        if hovered == Some(i) {
+            canvas::fill_rounded_rect(cr, 6.0, y + 2.0, w - 12.0, MENU_ROW_H - 6.0, 6.0, (0.90, 0.91, 0.94, 1.0));
+        }
+        let (_tw, th) = canvas::label_size(cr, row, &font);
+        canvas::draw_label(cr, row, &font, 16.0, y + (MENU_ROW_H - th as f64) / 2.0, theme::TEXT);
+    }
 }
 
 fn draw_dock_content(cr: &cairo::Context, width: i32, height: i32, hovered: Option<usize>) {
@@ -458,7 +700,7 @@ fn main() {
 
     // module: menubar (full-width top bar)
     let bar_spec = LayerSpec::top_bar("ibde-bar", BAR_H);
-    let (bar_id, bar_surface, _ls) = app
+    let (bar_id, bar_surface, ls) = app
         .session
         .as_mut()
         .unwrap()
@@ -467,12 +709,13 @@ fn main() {
     app.bar = Some(Module {
         id: bar_id,
         surface: bar_surface,
+        ls: Some(ls),
         kit: None,
     });
 
     // module: dock (floating, bottom-center, margin below)
     let dock_spec = LayerSpec::bottom_dock("ibde-dock", dock_width(), DOCK_H, DOCK_EDGE_GAP);
-    let (dock_id, dock_surface, _ls) = app
+    let (dock_id, dock_surface, ls) = app
         .session
         .as_mut()
         .unwrap()
@@ -481,8 +724,12 @@ fn main() {
     app.dock = Some(Module {
         id: dock_id,
         surface: dock_surface,
+        ls: Some(ls),
         kit: None,
     });
+
+    // hand-drawn cursor (set on every pointer enter)
+    app.build_cursor();
 
     let _ = conn.flush();
     queue.roundtrip(&mut app).expect("no configure arrived");

@@ -129,8 +129,14 @@ pub trait SessionHost {
         let _ = (depressed, latched, locked, group);
     }
     /// Pointer entered one of our surfaces (surface-local coords).
-    fn on_pointer_enter(&mut self, surface: &WlSurface, sx: f64, sy: f64) {
-        let _ = (surface, sx, sy);
+    fn on_pointer_enter(
+        &mut self,
+        surface: &WlSurface,
+        serial: u32,
+        sx: f64,
+        sy: f64,
+    ) {
+        let _ = (surface, serial, sx, sy);
     }
     /// Pointer left one of our surfaces.
     fn on_pointer_leave(&mut self, surface: &WlSurface) {
@@ -157,6 +163,9 @@ pub struct Session {
     pub layer_shell: Option<ZwlrLayerShellV1>,
     pub xdg_wm_base: Option<XdgWmBase>,
     pub seat: Option<WlSeat>,
+    /// Bound when the seat advertises Pointer — hosts use it for
+    /// set_cursor during on_pointer_enter.
+    pub pointer: Option<WlPointer>,
     next_id: u64,
 }
 
@@ -180,6 +189,7 @@ impl Session {
             layer_shell: None,
             xdg_wm_base: None,
             seat: None,
+            pointer: None,
             next_id: 0,
         });
         let _registry = conn.display().get_registry(qh, RegistryData);
@@ -569,7 +579,9 @@ macro_rules! delegate_ibde_session {
                             let _ = seat.get_keyboard(qh, ());
                         }
                         if caps.contains(Capability::Pointer) {
-                            let _ = seat.get_pointer(qh, ());
+                            if let Some(session) = state.session_slot().as_mut() {
+                                session.pointer = Some(seat.get_pointer(qh, ()));
+                            }
                         }
                     }
                 }
@@ -636,11 +648,12 @@ macro_rules! delegate_ibde_session {
                 match event {
                     Event::Enter {
                         surface,
+                        serial,
                         surface_x,
                         surface_y,
                         ..
                     } => {
-                        state.on_pointer_enter(&surface, surface_x, surface_y);
+                        state.on_pointer_enter(&surface, serial, surface_x, surface_y);
                     }
                     Event::Leave { surface, .. } => {
                         state.on_pointer_leave(&surface);
