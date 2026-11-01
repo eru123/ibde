@@ -83,6 +83,19 @@ struct App {
     menu_hover: Option<usize>,
     over_menu: bool,
     terminal_cmd: String,
+    // keyboard + spotlight
+    kbd: Option<ibde_ui::input::Keyboard>,
+    spotlight: Option<Module>,
+    spot_query: String,
+    spot_sel: usize,
+    spot_apps: Vec<AppEntry>,
+    spot_matches: Vec<usize>,
+}
+
+/// One scanned .desktop entry.
+struct AppEntry {
+    name: String,
+    exec: String,
 }
 
 impl App {
@@ -106,6 +119,12 @@ impl App {
             over_menu: false,
             terminal_cmd: std::env::var("IBDE_TERMINAL_CMD")
                 .unwrap_or_else(|_| "ibde-terminal".into()),
+            kbd: None,
+            spotlight: None,
+            spot_query: String::new(),
+            spot_sel: 0,
+            spot_apps: Vec::new(),
+            spot_matches: Vec::new(),
         }
     }
 
@@ -116,6 +135,8 @@ impl App {
             self.dock.as_mut()
         } else if self.menu.as_ref().is_some_and(|m| m.id == id) {
             self.menu.as_mut()
+        } else if self.spotlight.as_ref().is_some_and(|m| m.id == id) {
+            self.spotlight.as_mut()
         } else {
             None
         }
@@ -130,6 +151,20 @@ impl App {
             f(&cr, k.canvas.width, k.canvas.height);
         } // cairo Context must drop before surface data access
         k.canvas.copy_to(&mut k.buf);
+        if let Ok(path) = std::env::var("IBDE_DUMP_KIT") {
+            if path.ends_with(&format!("m{id}.ppm")) {
+                use std::io::Write;
+                if let Ok(f) = std::fs::File::create(&path) {
+                    let mut f = std::io::BufWriter::new(f);
+                    let _ = write!(f, "P6\n{} {}\n255\n", k.canvas.width, k.canvas.height);
+                    if let Ok(d) = k.canvas.surface_mut().data() {
+                        for px in d.chunks_exact(4) {
+                            let _ = f.write(&[px[2], px[1], px[0]]);
+                        }
+                    }
+                }
+            }
+        }
         m.surface.attach(Some(k.buf.wayland_buffer()), 0, 0);
         m.surface.damage_buffer(0, 0, k.buf.width, k.buf.height);
         m.surface.commit();
@@ -148,6 +183,164 @@ impl App {
         let id = self.dock.as_ref().map(|m| m.id).unwrap_or(0);
         let hovered = self.dock_hover;
         self.render_module(id, move |cr, w, h| draw_dock_content(cr, w, h, hovered));
+    }
+
+    fn draw_spotlight(&mut self) {
+        let Some(id) = self.spotlight.as_ref().map(|m| m.id) else {
+            return;
+        };
+        let query = self.spot_query.clone();
+        let sel = self.spot_sel;
+        let rows: Vec<String> = self
+            .spot_matches
+            .iter()
+            .take(7)
+            .map(|&i| self.spot_apps[i].name.clone())
+            .collect();
+        self.render_module(id, move |cr, w, h| {
+            draw_spotlight_content(cr, w, h, &query, &rows, sel)
+        });
+    }
+
+    fn rescan_apps(&mut self) {
+        self.spot_apps.clear();
+        let mut dirs = vec![
+            std::path::PathBuf::from("/usr/share/applications"),
+            std::path::PathBuf::from("/usr/local/share/applications"),
+        ];
+        if let Ok(home) = std::env::var("HOME") {
+            dirs.push(std::path::PathBuf::from(home).join(".local/share/applications"));
+        }
+        for d in dirs {
+            let Ok(entries) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.extension().is_none_or(|x| x != "desktop") {
+                    continue;
+                }
+                let Ok(body) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let mut name = None;
+                let mut exec = None;
+                let mut skip = false;
+                for line in body.lines() {
+                    match line {
+                        l if l.starts_with("Name=") && name.is_none() => {
+                            name = Some(l[5..].to_string());
+                        }
+                        l if l.starts_with("Exec=") && exec.is_none() => {
+                            exec = Some(l[5..].to_string());
+                        }
+                        "NoDisplay=true" | "Hidden=true" | "Terminal=true" => skip = true,
+                        _ => {}
+                    }
+                }
+                if skip {
+                    continue;
+                }
+                if let (Some(n), Some(x)) = (name, exec) {
+                    self.spot_apps.push(AppEntry { name: n, exec: x });
+                }
+            }
+        }
+        self.spot_apps.sort_by(|a, b| a.name.cmp(&b.name));
+        eprintln!("[shell] spotlight indexed {} apps", self.spot_apps.len());
+    }
+
+    fn update_spot_matches(&mut self) {
+        let q = self.spot_query.to_lowercase();
+        let mut scored: Vec<(i32, usize)> = self
+            .spot_apps
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| fuzzy_score(&q, &a.name.to_lowercase()).map(|s| (s, i)))
+            .collect();
+        scored.sort_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1)));
+        self.spot_matches = scored.into_iter().map(|(_, i)| i).collect();
+        self.spot_sel = 0;
+    }
+
+    fn open_spotlight(&mut self) {
+        if self.spotlight.is_some() {
+            self.close_spotlight();
+            return;
+        }
+        self.rescan_apps();
+        self.spot_query.clear();
+        self.update_spot_matches();
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let Some(qh) = self.qh.clone() else { return };
+        let spec = ibde_ui::session::LayerSpec {
+            namespace: "ibde-spotlight".into(),
+            layer: ibde_ui::session::Layer::Overlay,
+            // full-anchor: the compositor gives us the whole usable area;
+            // we center the card ourselves (avoids compositor-specific
+            // layer-height clamping observed in sway headless)
+            anchors: ibde_ui::session::Anchor::Top
+                | ibde_ui::session::Anchor::Bottom
+                | ibde_ui::session::Anchor::Left
+                | ibde_ui::session::Anchor::Right,
+            width: 0,
+            height: 0,
+            exclusive_zone: -1,
+            margins: (150, 390, 150, 290),
+            keyboard_interactive: true,
+        };
+        match session.create_layer(&spec, &qh) {
+            Some((id, surface, ls)) => {
+                self.spotlight = Some(Module {
+                    id,
+                    surface,
+                    ls: Some(ls),
+                    kit: None,
+                });
+            }
+            None => eprintln!("[shell] spotlight layer unavailable"),
+        }
+    }
+
+    fn close_spotlight(&mut self) {
+        if let Some(m) = self.spotlight.take() {
+            if let Some(ls) = &m.ls {
+                ls.destroy();
+            }
+            if let Some(conn) = &self.conn {
+                let _ = conn.flush();
+            }
+        }
+        self.spot_query.clear();
+        self.spot_sel = 0;
+    }
+
+    fn launch_spotlight(&mut self) {
+        let Some(&app_i) = self.spot_matches.get(self.spot_sel) else {
+            return;
+        };
+        let entry = &self.spot_apps[app_i];
+        // strip freedesktop field codes (%f %F %u %U %i %c %k)
+        let cmd = entry
+            .exec
+            .split_whitespace()
+            .find(|t| !t.starts_with('%'))
+            .unwrap_or("")
+            .to_string();
+        eprintln!("[shell] spotlight launching: {cmd}");
+        match std::process::Command::new(&cmd)
+            .env(
+                "WAYLAND_DISPLAY",
+                std::env::var("WAYLAND_DISPLAY").unwrap_or_default(),
+            )
+            .spawn()
+        {
+            Ok(child) => std::mem::forget(child),
+            Err(e) => eprintln!("[shell] spotlight launch failed: {e}"),
+        }
+        self.close_spotlight();
     }
 
     fn draw_menu(&mut self) {
@@ -175,6 +368,7 @@ impl App {
             height: MENU_H as u32,
             exclusive_zone: 0,
             margins: (8, 0, BAR_H + 4, 0),
+            keyboard_interactive: false,
         };
         match session.create_layer(&spec, &qh) {
             Some((id, surface, ls)) => {
@@ -289,6 +483,7 @@ impl SessionHost for App {
     }
 
     fn on_layer_configure(&mut self, id: u64, w: i32, h: i32) {
+        eprintln!("[shell] configure {id} {w}x{h}");
         let shm = self
             .session
             .as_ref()
@@ -297,7 +492,9 @@ impl SessionHost for App {
         let qh = self.qh.clone().expect("configure without qh");
         let is_bar = self.bar.as_ref().is_some_and(|b| b.id == id);
         let is_menu = self.menu.as_ref().is_some_and(|m| m.id == id);
-        let is_known = is_bar || is_menu || self.dock.as_ref().is_some_and(|d| d.id == id);
+        let is_spot = self.spotlight.as_ref().is_some_and(|m| m.id == id);
+        let is_known =
+            is_bar || is_menu || is_spot || self.dock.as_ref().is_some_and(|d| d.id == id);
         if !is_known {
             eprintln!("[shell] configure for unknown surface {id}");
             return;
@@ -316,6 +513,8 @@ impl SessionHost for App {
             self.draw_bar();
         } else if is_menu {
             self.draw_menu();
+        } else if is_spot {
+            self.draw_spotlight();
         } else {
             let id2 = id;
             self.render_module(id2, move |cr, w, h| draw_dock_content(cr, w, h, None));
@@ -326,6 +525,68 @@ impl SessionHost for App {
         eprintln!("[shell] layer {id} closed");
         if self.menu.as_ref().is_some_and(|m| m.id == id) {
             self.menu = None;
+        }
+    }
+
+    fn on_keymap(&mut self, _format: u32, fd: std::os::fd::OwnedFd, size: u32) {
+        match ibde_ui::input::Keyboard::from_fd(fd, size as usize) {
+            Some(k) => self.kbd = Some(k),
+            None => eprintln!("[shell] keymap rejected"),
+        }
+    }
+
+    fn on_modifiers(&mut self, depressed: u32, latched: u32, locked: u32, group: u32) {
+        if let Some(k) = self.kbd.as_mut() {
+            k.update_mask(depressed, latched, locked, group);
+        }
+    }
+
+    fn on_key(&mut self, keycode: u32, pressed: bool) {
+        if !pressed {
+            return;
+        }
+        let Some(k) = self.kbd.as_ref() else { return };
+        const KEY_SPACE: u32 = 57;
+        const KEY_ESC: u32 = 1;
+        const KEY_ENTER: u32 = 28;
+        const KEY_UP: u32 = 103;
+        const KEY_DOWN: u32 = 108;
+        const KEY_BACKSPACE: u32 = 14;
+
+        // Ctrl+Space toggles spotlight (Linux default binding, UX-SPEC §4)
+        if keycode == KEY_SPACE && k.ctrl_held() {
+            self.open_spotlight();
+            return;
+        }
+        if self.spotlight.is_none() {
+            return;
+        }
+        match keycode {
+            KEY_ESC => self.close_spotlight(),
+            KEY_ENTER => self.launch_spotlight(),
+            KEY_UP => {
+                self.spot_sel = self.spot_sel.saturating_sub(1);
+                self.draw_spotlight();
+            }
+            KEY_DOWN => {
+                if self.spot_sel + 1 < self.spot_matches.len().min(SPOT_MAX_ROWS) {
+                    self.spot_sel += 1;
+                }
+                self.draw_spotlight();
+            }
+            KEY_BACKSPACE => {
+                self.spot_query.pop();
+                self.update_spot_matches();
+                self.draw_spotlight();
+            }
+            _ => {
+                let ev = k.translate(keycode + 8);
+                if !ev.utf8.is_empty() && ev.utf8.chars().all(|c| !c.is_control()) {
+                    self.spot_query.push_str(&ev.utf8);
+                    self.update_spot_matches();
+                    self.draw_spotlight();
+                }
+            }
         }
     }
 
@@ -542,6 +803,165 @@ fn menu_item_at(sx: f64, sy: f64) -> Option<usize> {
     }
     let i = ((sy - 24.0) / MENU_ROW_H) as usize;
     (i < MENU_ROWS.len()).then_some(i)
+}
+
+/// Spotlight layout.
+const SPOT_W: i32 = 480;
+const SPOT_H: i32 = 258;
+const SPOT_ROW_H: f64 = 30.0;
+const SPOT_MAX_ROWS: usize = 7;
+
+/// Subsequence fuzzy score; None = no match. Higher is better.
+fn fuzzy_score(query: &str, name: &str) -> Option<i32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let mut score = 0i32;
+    let mut qi = query.chars().peekable();
+    let mut prev_match = false;
+    let mut matched_any = false;
+    for c in name.chars() {
+        if qi.peek() == Some(&c) {
+            qi.next();
+            score += if prev_match { 3 } else { 1 };
+            if name.starts_with(query) {
+                score += 5; // prefix bonus (checked once is enough)
+            }
+            prev_match = true;
+            matched_any = true;
+        } else {
+            prev_match = false;
+        }
+    }
+    if qi.peek().is_some() {
+        return None;
+    }
+    matched_any.then_some(score)
+}
+
+fn draw_spotlight_content(
+    cr: &cairo::Context,
+    width: i32,
+    height: i32,
+    query: &str,
+    rows: &[String],
+    sel: usize,
+) {
+    let w = width as f64;
+    let h = height as f64;
+    cr.set_operator(cairo::Operator::Clear);
+    let _ = cr.paint();
+    cr.set_operator(cairo::Operator::Over);
+
+    // card centered inside the (full-anchor) surface
+    let cw = SPOT_W as f64;
+    let ch = SPOT_H as f64;
+    let cx = (w - cw) / 2.0;
+    let cy = (h - ch) / 2.0;
+    canvas::fill_rounded_rect(cr, cx, cy, cw, ch, 14.0, (1.0, 1.0, 1.0, 0.98));
+    cr.set_source_rgba(0.85, 0.85, 0.87, 1.0);
+    cr.set_line_width(1.0);
+    cr.new_path();
+    cr.arc(
+        cx + 14.0,
+        cy + 14.0,
+        13.5,
+        std::f64::consts::PI,
+        1.5 * std::f64::consts::PI,
+    );
+    cr.arc(
+        cx + cw - 14.0,
+        cy + 14.0,
+        13.5,
+        -0.5 * std::f64::consts::PI,
+        0.0,
+    );
+    cr.arc(
+        cx + cw - 14.0,
+        cy + ch - 14.0,
+        13.5,
+        0.0,
+        0.5 * std::f64::consts::PI,
+    );
+    cr.arc(
+        cx + 14.0,
+        cy + ch - 14.0,
+        13.5,
+        0.5 * std::f64::consts::PI,
+        std::f64::consts::PI,
+    );
+    cr.close_path();
+    let _ = cr.stroke();
+
+    let font = pango::FontDescription::from_string("Sans 15");
+    let row_font = pango::FontDescription::from_string("Sans 12");
+    let hint_font = pango::FontDescription::from_string("Sans 9");
+
+    // search line
+    let shown = if query.is_empty() {
+        "Application Search"
+    } else {
+        query
+    };
+    let color = if query.is_empty() {
+        theme::TEXT_MUTED
+    } else {
+        theme::TEXT
+    };
+    let (_tw, th) = canvas::label_size(cr, shown, &font);
+    canvas::draw_label(
+        cr,
+        shown,
+        &font,
+        cx + 20.0,
+        cy + 20.0 + (30.0 - th as f64) / 2.0,
+        color,
+    );
+    cr.set_source_rgba(0.88, 0.88, 0.90, 1.0);
+    cr.rectangle(cx + 12.0, cy + 58.5, cw - 24.0, 1.0);
+    let _ = cr.fill();
+
+    // result rows
+    for (i, name) in rows.iter().take(SPOT_MAX_ROWS).enumerate() {
+        let y = cy + 64.0 + i as f64 * SPOT_ROW_H;
+        if i == sel {
+            canvas::fill_rounded_rect(
+                cr,
+                cx + 10.0,
+                y,
+                cw - 20.0,
+                SPOT_ROW_H - 4.0,
+                7.0,
+                theme::ACCENT,
+            );
+        }
+        let (_tw, rh) = canvas::label_size(cr, name, &row_font);
+        let color = if i == sel {
+            theme::ON_ACCENT
+        } else {
+            theme::TEXT
+        };
+        canvas::draw_label(
+            cr,
+            name,
+            &row_font,
+            cx + 22.0,
+            y + (SPOT_ROW_H - 4.0 - rh as f64) / 2.0,
+            color,
+        );
+    }
+
+    // footer
+    let hint = "up-down choose - enter open - esc close";
+    let (_hw, hh) = canvas::label_size(cr, hint, &hint_font);
+    canvas::draw_label(
+        cr,
+        hint,
+        &hint_font,
+        cx + (cw - _hw as f64) / 2.0,
+        cy + ch - 22.0 + (14.0 - hh as f64) / 2.0,
+        theme::TEXT_MUTED,
+    );
 }
 
 fn draw_menu_content(cr: &cairo::Context, width: i32, height: i32, hovered: Option<usize>) {

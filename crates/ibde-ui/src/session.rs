@@ -240,6 +240,9 @@ impl Session {
         if spec.exclusive_zone != 0 {
             ls.set_exclusive_zone(spec.exclusive_zone);
         }
+        if spec.keyboard_interactive {
+            ls.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
+        }
         surface.commit();
         Some((_id, surface, ls))
     }
@@ -309,10 +312,15 @@ pub struct LayerSpec {
     pub exclusive_zone: i32,
     /// (left, right, top, bottom) margins from the anchored edges.
     pub margins: (i32, i32, i32, i32),
+    /// Request exclusive keyboard focus (popovers, spotlight).
+    pub keyboard_interactive: bool,
 }
 
 impl LayerSpec {
-    /// Full-width top bar of `height` px (menubar-style).
+    /// Full-width top bar of `height` px (menubar-style). The bar takes
+    /// keyboard focus when no app window has it — the shell owns global
+    /// shortcuts (Ctrl+Space) until an app is focused (v0 approximation;
+    /// compositor-level bindings are the ADR-0008 endgame).
     pub fn top_bar(namespace: &str, height: i32) -> Self {
         LayerSpec {
             namespace: namespace.to_string(),
@@ -322,6 +330,7 @@ impl LayerSpec {
             height: height as u32,
             exclusive_zone: height,
             margins: (0, 0, 0, 0),
+            keyboard_interactive: true,
         }
     }
 
@@ -336,6 +345,7 @@ impl LayerSpec {
             height: height as u32,
             exclusive_zone: 0,
             margins: (0, 0, 0, gap),
+            keyboard_interactive: false,
         }
     }
 }

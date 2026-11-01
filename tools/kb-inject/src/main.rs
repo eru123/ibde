@@ -119,6 +119,7 @@ fn find_key(ch: char) -> Option<(u32, bool)> {
 
 fn main() {
     let mut text = String::new();
+    let mut special: Option<String> = None;
     let mut delay_ms = 60u64;
     let mut after_ms = 500u64;
     let mut args = std::env::args().skip(1);
@@ -126,6 +127,7 @@ fn main() {
         let mut val = || args.next().expect("missing flag value");
         match a.as_str() {
             "--text" => text = val(),
+            "--special" => special = Some(val()),
             "--delay-ms" => delay_ms = val().parse().expect("bad delay"),
             "--after-ms" => after_ms = val().parse().expect("bad after"),
             other => {
@@ -207,6 +209,47 @@ fn main() {
             let _ = conn.flush();
         }
         std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+    }
+    if let Some(combo) = special {
+        // named combos for the bench workout: "ctrl+space", "esc",
+        // "enter", "up", "down"
+        use xkbcommon::xkb;
+        let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let keymap =
+            xkb::Keymap::new_from_names(&ctx, "", "", "us", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)
+                .expect("keymap");
+        let ctrl = 1u32 << keymap.mod_get_index("Control");
+        let mut mods = 0u32;
+        let key: u32 = match combo.as_str() {
+            "ctrl+space" => {
+                mods = ctrl;
+                57 // evdev KEY_SPACE
+            }
+            "esc" => 1,
+            "enter" => 28,
+            "up" => 103,
+            "down" => 108,
+            other => {
+                eprintln!("unknown special {other}");
+                std::process::exit(1);
+            }
+        };
+        if mods != 0 {
+            vk.modifiers(mods, 0, 0, 0);
+            let _ = conn.flush();
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        vk.key(t(), key, 1);
+        let _ = conn.flush();
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        vk.key(t(), key, 0);
+        let _ = conn.flush();
+        if mods != 0 {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            vk.modifiers(0, 0, 0, 0);
+            let _ = conn.flush();
+        }
+        eprintln!("[kb-inject] special {combo}");
     }
     eprintln!("[kb-inject] typed {} chars", text.chars().count());
 }
