@@ -10,6 +10,7 @@ ibde-ui.workspace = true
 cairo-rs.workspace = true
 pango.workspace = true
 libc.workspace = true
+zbus.workspace = true
 
 
 [[bin]]

@@ -86,10 +86,88 @@ struct App {
     // keyboard + spotlight
     kbd: Option<ibde_ui::input::Keyboard>,
     spotlight: Option<Module>,
+    toast: Option<Module>,
+    toast_data: Option<Toast>,
     spot_query: String,
     spot_sel: usize,
     spot_apps: Vec<AppEntry>,
     spot_matches: Vec<usize>,
+}
+
+/// Active toast content.
+struct Toast {
+    app: String,
+    summary: String,
+    body: String,
+    expires_at: Instant,
+}
+
+/// Commands from the D-Bus notification server thread.
+enum NotifyCmd {
+    Show {
+        #[allow(dead_code)]
+        id: u32,
+        app: String,
+        summary: String,
+        body: String,
+        timeout_ms: i64,
+    },
+    Close(#[allow(dead_code)] u32),
+}
+
+/// org.freedesktop.Notifications (spec subset) served by the shell.
+struct NotificationsIface {
+    tx: std::sync::mpsc::Sender<NotifyCmd>,
+    next_id: std::sync::atomic::AtomicU32,
+}
+
+#[zbus::interface(name = "org.freedesktop.Notifications")]
+#[allow(clippy::too_many_arguments)] // fixed by the freedesktop spec
+impl NotificationsIface {
+    fn notify(
+        &self,
+        app_name: String,
+        replaces_id: u32,
+        _app_icon: String,
+        summary: String,
+        body: String,
+        _actions: Vec<String>,
+        _hints: std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+        expire_timeout: i32,
+    ) -> u32 {
+        let id = if replaces_id == 0 {
+            self.next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1
+        } else {
+            replaces_id
+        };
+        let timeout_ms = if expire_timeout <= 0 {
+            5000
+        } else {
+            expire_timeout as i64
+        };
+        let _ = self.tx.send(NotifyCmd::Show {
+            id,
+            app: app_name,
+            summary,
+            body,
+            timeout_ms,
+        });
+        id
+    }
+
+    fn get_capabilities(&self) -> Vec<String> {
+        vec!["body".to_string(), "body-markup".to_string()]
+    }
+
+    fn get_server_information(&self) -> (String, String, String, String) {
+        ("ibde".into(), "IBDE".into(), "0.1".into(), "1.2".into())
+    }
+
+    fn close_notification(&self, id: u32) {
+        let _ = self.tx.send(NotifyCmd::Close(id));
+    }
 }
 
 /// One scanned .desktop entry.
@@ -121,6 +199,8 @@ impl App {
                 .unwrap_or_else(|_| "ibde-terminal".into()),
             kbd: None,
             spotlight: None,
+            toast: None,
+            toast_data: None,
             spot_query: String::new(),
             spot_sel: 0,
             spot_apps: Vec::new(),
@@ -137,6 +217,8 @@ impl App {
             self.menu.as_mut()
         } else if self.spotlight.as_ref().is_some_and(|m| m.id == id) {
             self.spotlight.as_mut()
+        } else if self.toast.as_ref().is_some_and(|m| m.id == id) {
+            self.toast.as_mut()
         } else {
             None
         }
@@ -452,6 +534,66 @@ impl App {
         self.cursor = Some(CursorKit { surface, _buf: buf });
     }
 
+    fn show_toast(&mut self, t: Toast) {
+        if self.toast.is_none() {
+            let Some(session) = self.session.as_mut() else {
+                return;
+            };
+            let Some(qh) = self.qh.clone() else { return };
+            let spec = ibde_ui::session::LayerSpec {
+                namespace: "ibde-toast".into(),
+                layer: ibde_ui::session::Layer::Overlay,
+                anchors: ibde_ui::session::Anchor::Top | ibde_ui::session::Anchor::Right,
+                width: 340,
+                height: 84,
+                exclusive_zone: 0,
+                margins: (0, 12, 12, 0),
+                keyboard_interactive: false,
+            };
+            match session.create_layer(&spec, &qh) {
+                Some((id, surface, ls)) => {
+                    self.toast = Some(Module {
+                        id,
+                        surface,
+                        ls: Some(ls),
+                        kit: None,
+                    });
+                }
+                None => {
+                    eprintln!("[shell] toast layer unavailable");
+                    return;
+                }
+            }
+        }
+        self.toast_data = Some(t);
+        self.draw_toast();
+    }
+
+    fn close_toast(&mut self) {
+        self.toast_data = None;
+        if let Some(m) = self.toast.take() {
+            if let Some(ls) = &m.ls {
+                ls.destroy();
+            }
+            if let Some(conn) = &self.conn {
+                let _ = conn.flush();
+            }
+        }
+    }
+
+    fn draw_toast(&mut self) {
+        let Some(id) = self.toast.as_ref().map(|m| m.id) else {
+            return;
+        };
+        let Some(t) = self.toast_data.as_ref() else {
+            return;
+        };
+        let (app, summary, body) = (t.app.clone(), t.summary.clone(), t.body.clone());
+        self.render_module(id, move |cr, w, h| {
+            draw_toast_content(cr, w, h, &app, &summary, &body)
+        });
+    }
+
     /// Launch the app pinned at dock index 0..2 (trash is a no-op).
     fn launch(&self, index: usize) {
         let cmd = match index {
@@ -493,8 +635,12 @@ impl SessionHost for App {
         let is_bar = self.bar.as_ref().is_some_and(|b| b.id == id);
         let is_menu = self.menu.as_ref().is_some_and(|m| m.id == id);
         let is_spot = self.spotlight.as_ref().is_some_and(|m| m.id == id);
-        let is_known =
-            is_bar || is_menu || is_spot || self.dock.as_ref().is_some_and(|d| d.id == id);
+        let is_toast = self.toast.as_ref().is_some_and(|m| m.id == id);
+        let is_known = is_bar
+            || is_menu
+            || is_spot
+            || is_toast
+            || self.dock.as_ref().is_some_and(|d| d.id == id);
         if !is_known {
             eprintln!("[shell] configure for unknown surface {id}");
             return;
@@ -515,6 +661,8 @@ impl SessionHost for App {
             self.draw_menu();
         } else if is_spot {
             self.draw_spotlight();
+        } else if is_toast {
+            self.draw_toast();
         } else {
             let id2 = id;
             self.render_module(id2, move |cr, w, h| draw_dock_content(cr, w, h, None));
@@ -839,6 +987,74 @@ fn fuzzy_score(query: &str, name: &str) -> Option<i32> {
     matched_any.then_some(score)
 }
 
+fn draw_toast_content(
+    cr: &cairo::Context,
+    width: i32,
+    height: i32,
+    app: &str,
+    summary: &str,
+    body: &str,
+) {
+    let w = width as f64;
+    let h = height as f64;
+    cr.set_operator(cairo::Operator::Clear);
+    let _ = cr.paint();
+    cr.set_operator(cairo::Operator::Over);
+
+    canvas::fill_rounded_rect(cr, 0.0, 0.0, w, h, 12.0, (1.0, 1.0, 1.0, 0.97));
+    cr.set_source_rgba(0.85, 0.85, 0.87, 1.0);
+    cr.set_line_width(1.0);
+    cr.new_path();
+    cr.arc(
+        12.0,
+        12.0,
+        11.5,
+        std::f64::consts::PI,
+        1.5 * std::f64::consts::PI,
+    );
+    cr.arc(w - 12.0, 12.0, 11.5, -0.5 * std::f64::consts::PI, 0.0);
+    cr.arc(w - 12.0, h - 12.0, 11.5, 0.0, 0.5 * std::f64::consts::PI);
+    cr.arc(
+        12.0,
+        h - 12.0,
+        11.5,
+        0.5 * std::f64::consts::PI,
+        std::f64::consts::PI,
+    );
+    cr.close_path();
+    let _ = cr.stroke();
+
+    let small = pango::FontDescription::from_string("Sans 9");
+    let semi = {
+        let mut f = pango::FontDescription::from_string("Sans 12");
+        f.set_weight(pango::Weight::Semibold);
+        f
+    };
+    let body_font = pango::FontDescription::from_string("Sans 11");
+
+    canvas::draw_label(cr, app, &small, 14.0, 8.0, theme::TEXT_MUTED);
+    let (_sw, sh) = canvas::label_size(cr, summary, &semi);
+    canvas::draw_label(
+        cr,
+        summary,
+        &semi,
+        14.0,
+        24.0 + (18.0 - sh as f64) / 2.0,
+        theme::TEXT,
+    );
+    // body: single line, truncated to card width (wrap comes with the
+    // widget tree)
+    let (_bw, bh) = canvas::label_size(cr, body, &body_font);
+    canvas::draw_label(
+        cr,
+        body,
+        &body_font,
+        14.0,
+        46.0 + (16.0 - bh as f64) / 2.0,
+        theme::TEXT_MUTED,
+    );
+}
+
 fn draw_spotlight_content(
     cr: &cairo::Context,
     width: i32,
@@ -1119,6 +1335,10 @@ fn dock_width() -> i32 {
     (pad * 2.0 + items as f64 * icon + (items as f64 - 1.0) * gap + sep_space) as i32
 }
 
+fn app_shell_show_toast(app: &mut App, t: Toast) {
+    app.show_toast(t);
+}
+
 fn main() {
     let mut seconds = 6.0f64;
     let mut args = std::env::args().skip(1);
@@ -1184,6 +1404,39 @@ fn main() {
         "bar/dock never configured"
     );
 
+    // notifications: serve org.freedesktop.Notifications on the session
+    // bus; toasts render as layer surfaces and auto-expire in the loop
+    let (ntx, nrx) = std::sync::mpsc::channel::<NotifyCmd>();
+    {
+        let ntx = ntx.clone();
+        std::thread::spawn(move || {
+            match zbus::blocking::Connection::session() {
+                Ok(conn) => {
+                    let iface = NotificationsIface {
+                        tx: ntx,
+                        next_id: std::sync::atomic::AtomicU32::new(1),
+                    };
+                    match conn
+                        .object_server()
+                        .at("/org/freedesktop/Notifications", iface)
+                    {
+                        Ok(_) => {}
+                        Err(e) => eprintln!("[shell] notif object-server error: {e}"),
+                    }
+                    if let Err(e) = conn.request_name("org.freedesktop.Notifications") {
+                        eprintln!("[shell] notif name error: {e}");
+                    }
+                    eprintln!("[shell] notifications serving on the session bus");
+                    // block this thread serving requests
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(3600));
+                    }
+                }
+                Err(e) => eprintln!("[shell] no session bus ({e}); notifications off"),
+            }
+        });
+    }
+
     // 1 Hz tick: clock redraws once per second, nothing else repaints
     let (tx, rx) = mpsc::channel::<()>();
     std::thread::spawn(move || loop {
@@ -1212,6 +1465,37 @@ fn main() {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        // notifications: drain commands, expire toasts
+        loop {
+            match nrx.try_recv() {
+                Ok(NotifyCmd::Show {
+                    id: _,
+                    app: app_name,
+                    summary,
+                    body,
+                    timeout_ms,
+                }) => {
+                    let t = Toast {
+                        app: app_name,
+                        summary,
+                        body,
+                        expires_at: Instant::now()
+                            + Duration::from_millis(timeout_ms.max(500) as u64),
+                    };
+                    app_shell_show_toast(&mut app, t);
+                }
+                Ok(NotifyCmd::Close(_)) => app.close_toast(),
+                Err(_) => break,
+            }
+        }
+        if app
+            .toast_data
+            .as_ref()
+            .is_some_and(|t| Instant::now() >= t.expires_at)
+        {
+            app.close_toast();
+        }
+
         // canonical wayland poll loop (dispatch_pending alone never
         // reads the socket — pointer events would never arrive)
         if let Err(e) = queue.dispatch_pending(&mut app) {
