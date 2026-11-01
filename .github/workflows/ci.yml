@@ -3,7 +3,10 @@ name: ci
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+  schedule:
+    - cron: "0 3 * * *" # nightly soak
 
 jobs:
   check:
@@ -45,12 +48,12 @@ jobs:
           if-no-files-found: error
 
   workout:
-    name: bench v1 interactive workout (headless sway)
+    name: bench interactive workout (headless sway)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: install native deps (cairo, pango, wayland, xkb)
+      - name: install native deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -76,3 +79,92 @@ jobs:
             bench/results/workout.json
             bench/shots/workout.png
           if-no-files-found: warn
+
+  arm64:
+    name: arm64 cross-build (Pi-class proof)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build arm64 cross-builder image
+        run: docker build -t ibde-arm64 packaging/arm64-build
+      - name: cross-compile workspace
+        run: docker run --rm -v "$PWD:/src" ibde-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ibde-binaries-arm64
+          path: |
+            target/aarch64-unknown-linux-gnu/release/ibde-shell
+            target/aarch64-unknown-linux-gnu/release/ibde-terminal
+          if-no-files-found: error
+
+  soak:
+    name: 1h soak (nightly)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: install native deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2-dev libpango1.0-dev libwayland-dev \
+            libxkbcommon-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build workspace
+        run: cargo build --release
+      - name: build sway test image
+        run: docker build -t ibde-sway-test bench/docker/sway-test
+      - name: soak (1h, kb-inject churn, RSS-drift gate)
+        run: bench/soak.sh --minutes 60
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-report
+          path: |
+            bench/results/soak.json
+          if-no-files-found: warn
+
+  package:
+    name: debs + signed apt repo (on tag)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [check, workout, arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install native deps + cargo-deb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2-dev libpango1.0-dev libwayland-dev \
+            libxkbcommon-dev pkg-config
+          cargo install --locked cargo-deb
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: build debs
+        run: cargo deb -p ibde-shell && cargo deb -p ibde-terminal
+
+      - name: import repo signing key
+        run: |
+          echo "${{ secrets.IBDE_APT_KEY }}" | gpg --dearmor > /tmp/aptkey.gpg
+          gpg --import /tmp/aptkey.gpg
+          rm /tmp/aptkey.gpg
+
+      - name: assemble + sign repo
+        run: packaging/make-repo.sh
+
+      - name: publish apt repo to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./packaging/repo
+          destination_dir: .
+          keep_files: false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ibde-debs
+          path: target/debian/*.deb
+          if-no-files-found: error

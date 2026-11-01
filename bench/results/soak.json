@@ -1,0 +1,8 @@
+{
+  "profile": "soak-sway-pixman",
+  "date": "2026-11-01T06:44:50Z",
+  "minutes": 5,
+  "shell": {"rss_kb_start": 16076, "rss_kb_end": 16288, "drift_pct": 1.32},
+  "terminal": {"rss_kb_start": 20556, "rss_kb_end": 20756, "drift_pct": 0.97},
+  "alive": "1 1"
+}
