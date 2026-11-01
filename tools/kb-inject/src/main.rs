@@ -118,16 +118,20 @@ fn find_key(ch: char) -> Option<(u32, bool)> {
 }
 
 fn main() {
-    let mut text = String::new();
-    let mut special: Option<String> = None;
+    #[derive(Clone)]
+    enum Action {
+        Text(String),
+        Special(String),
+    }
+    let mut actions: Vec<Action> = Vec::new();
     let mut delay_ms = 60u64;
     let mut after_ms = 500u64;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut val = || args.next().expect("missing flag value");
         match a.as_str() {
-            "--text" => text = val(),
-            "--special" => special = Some(val()),
+            "--text" => actions.push(Action::Text(val())),
+            "--special" => actions.push(Action::Special(val())),
             "--delay-ms" => delay_ms = val().parse().expect("bad delay"),
             "--after-ms" => after_ms = val().parse().expect("bad after"),
             other => {
@@ -185,85 +189,100 @@ fn main() {
 
     let t0 = std::time::Instant::now();
     let t = || t0.elapsed().as_millis() as u32;
-    for ch in text.chars() {
-        let Some((kc, shift)) = find_key(ch) else {
-            eprintln!("no key for {ch:?}, skipping");
-            continue;
-        };
-        if shift {
-            vk.modifiers(1, 0, 0, 0);
-            let _ = conn.flush();
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        // find_key returns xkb keycodes (evdev + 8); the protocol wants
-        // evdev codes (linux/input-event-codes.h)
-        let evdev = kc - 8;
-        vk.key(t(), evdev, 1); // pressed
-        let _ = conn.flush();
-        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        vk.key(t(), evdev, 0); // released
-        let _ = conn.flush();
-        if shift {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            vk.modifiers(0, 0, 0, 0);
-            let _ = conn.flush();
-        }
-        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-    }
-    if let Some(combo) = special {
-        // named combos for the bench workout: "ctrl+space", "esc",
-        // "enter", "up", "down"
-        use xkbcommon::xkb;
-        let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-        let keymap =
-            xkb::Keymap::new_from_names(&ctx, "", "", "us", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)
+    for action in &actions {
+        match action {
+            Action::Text(text) => {
+                for ch in text.chars() {
+                    let Some((kc, shift)) = find_key(ch) else {
+                        eprintln!("no key for {ch:?}, skipping");
+                        continue;
+                    };
+                    if shift {
+                        vk.modifiers(1, 0, 0, 0);
+                        let _ = conn.flush();
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    // find_key returns xkb keycodes (evdev + 8); the
+                    // protocol wants evdev codes
+                    let evdev = kc - 8;
+                    vk.key(t(), evdev, 1);
+                    let _ = conn.flush();
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    vk.key(t(), evdev, 0);
+                    let _ = conn.flush();
+                    if shift {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        vk.modifiers(0, 0, 0, 0);
+                        let _ = conn.flush();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                }
+            }
+            Action::Special(combo) => {
+                use xkbcommon::xkb;
+                let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+                let keymap = xkb::Keymap::new_from_names(
+                    &ctx,
+                    "",
+                    "",
+                    "us",
+                    "",
+                    None,
+                    xkb::KEYMAP_COMPILE_NO_FLAGS,
+                )
                 .expect("keymap");
-        let ctrl = 1u32 << keymap.mod_get_index("Control");
-        let shift = 1u32 << keymap.mod_get_index("Shift");
-        let mut mods = 0u32;
-        let key: u32 = match combo.as_str() {
-            "ctrl+space" => {
-                mods = ctrl;
-                57 // evdev KEY_SPACE
+                let ctrl = 1u32 << keymap.mod_get_index("Control");
+                let shift = 1u32 << keymap.mod_get_index("Shift");
+                let mut mods = 0u32;
+                let key: u32 = match combo.as_str() {
+                    "ctrl+space" => {
+                        mods = ctrl;
+                        57
+                    }
+                    "shift+pgup" => {
+                        mods = shift;
+                        104
+                    }
+                    "shift+pgdn" => {
+                        mods = shift;
+                        109
+                    }
+                    "ctrl+shift+f" => {
+                        mods = ctrl | shift;
+                        33
+                    }
+                    "esc" => 1,
+                    "enter" => 28,
+                    "up" => 103,
+                    "down" => 108,
+                    "vol-up" => 115,
+                    "vol-down" => 114,
+                    "mute" => 113,
+                    "bright-up" => 233,
+                    "bright-down" => 232,
+                    other => {
+                        eprintln!("unknown special {other}");
+                        std::process::exit(1);
+                    }
+                };
+                if mods != 0 {
+                    vk.modifiers(mods, 0, 0, 0);
+                    let _ = conn.flush();
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                }
+                vk.key(t(), key, 1);
+                let _ = conn.flush();
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                vk.key(t(), key, 0);
+                let _ = conn.flush();
+                if mods != 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                    vk.modifiers(0, 0, 0, 0);
+                    let _ = conn.flush();
+                }
+                eprintln!("[kb-inject] special {combo}");
             }
-            "shift+pgup" => {
-                mods = shift;
-                104
-            }
-            "shift+pgdn" => {
-                mods = shift;
-                109
-            }
-            "esc" => 1,
-            "enter" => 28,
-            "up" => 103,
-            "down" => 108,
-            "vol-up" => 115,
-            "vol-down" => 114,
-            "mute" => 113,
-            "bright-up" => 233,
-            "bright-down" => 232,
-            other => {
-                eprintln!("unknown special {other}");
-                std::process::exit(1);
-            }
-        };
-        if mods != 0 {
-            vk.modifiers(mods, 0, 0, 0);
-            let _ = conn.flush();
-            std::thread::sleep(std::time::Duration::from_millis(15));
         }
-        vk.key(t(), key, 1);
-        let _ = conn.flush();
-        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        vk.key(t(), key, 0);
-        let _ = conn.flush();
-        if mods != 0 {
-            std::thread::sleep(std::time::Duration::from_millis(15));
-            vk.modifiers(0, 0, 0, 0);
-            let _ = conn.flush();
-        }
-        eprintln!("[kb-inject] special {combo}");
     }
-    eprintln!("[kb-inject] typed {} chars", text.chars().count());
+    eprintln!("[kb-inject] {} actions done", actions.len());
 }

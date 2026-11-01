@@ -9,6 +9,8 @@ license.workspace = true
 ibde-ui.workspace = true
 vte.workspace = true
 portable-pty.workspace = true
+cairo-rs.workspace = true
+pango.workspace = true
 libc.workspace = true
 
 [[bin]]

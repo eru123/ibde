@@ -43,6 +43,9 @@ struct App {
     default_rows: usize,
     font_size: i32,
     configured: bool,
+    search: Option<String>,
+    last_match: Option<usize>,
+    needs_render: bool,
     // input
     focused: bool,
     kbd: Option<ibde_ui::input::Keyboard>,
@@ -68,6 +71,9 @@ impl App {
             default_rows,
             font_size,
             configured: false,
+            search: None,
+            last_match: None,
+            needs_render: false,
             focused: false,
             kbd: None,
             writer: None,
@@ -130,8 +136,11 @@ impl App {
         let canvas = self.canvas.as_ref().unwrap();
         let model = self.model.as_mut().unwrap();
         let stats = render_grid(atlas, canvas, &mut model.grid);
-        if stats.rows_drawn == 0 {
+        if stats.rows_drawn == 0 && self.search.is_none() {
             return false;
+        }
+        if let Some(q) = self.search.as_ref() {
+            draw_search_overlay(canvas, q, self.search_matches(q), self.last_match);
         }
         if let (Some(c), Some(b)) = (self.canvas.as_mut(), self.buf.as_mut()) {
             c.copy_to(b);
@@ -175,6 +184,78 @@ impl App {
             }
         }
     }
+}
+
+impl App {
+    /// All case-insensitive matches (absolute rows) for `q` across
+    /// history + live grid.
+    fn search_matches(&self, q: &str) -> Vec<usize> {
+        let Some(m) = self.model.as_ref() else {
+            return Vec::new();
+        };
+        let ql = q.to_lowercase();
+        if ql.is_empty() {
+            return Vec::new();
+        }
+        let hist = m.grid.history_len();
+        let mut out = Vec::new();
+        for a in 0..hist + m.grid.rows() {
+            let text: String = if a < hist {
+                m.grid.history_row_text(a)
+            } else {
+                let gy = a - hist;
+                (0..m.grid.cols())
+                    .map(|x| m.grid.get(x, gy).map(|c| c.ch).unwrap_or(' '))
+                    .collect()
+            };
+            if text.to_lowercase().contains(&ql) {
+                out.push(a);
+            }
+        }
+        out
+    }
+
+    /// Jump the view so absolute row `a` is the top visible row.
+    fn jump_to_row(&mut self, a: usize) {
+        let Some(m) = self.model.as_mut() else { return };
+        let hist = m.grid.history_len();
+        if a < hist {
+            let view = hist - a;
+            m.grid.scroll_view(view as i32);
+        } else {
+            m.grid.scroll_view(-(m.grid.view as i32));
+        }
+    }
+}
+
+/// Search overlay strip along the top of the terminal surface.
+fn draw_search_overlay(canvas: &Canvas, query: &str, matches: Vec<usize>, current: Option<usize>) {
+    let Ok(cr) = canvas.context() else { return };
+    let w = canvas.width as f64;
+    cr.set_operator(cairo::Operator::Over);
+    cr.set_source_rgba(0.13, 0.14, 0.17, 0.94);
+    cr.rectangle(0.0, 0.0, w, 26.0);
+    let _ = cr.fill();
+    let font = pango::FontDescription::from_string("Sans 11");
+    let idx = matches
+        .iter()
+        .position(|m| Some(*m) == current)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let label = if query.is_empty() {
+        "Search:".to_string()
+    } else {
+        format!("Search: {query}  [{idx}/{}]", matches.len())
+    };
+    let (_tw, th) = ibde_ui::canvas::label_size(&cr, &label, &font);
+    ibde_ui::canvas::draw_label(
+        &cr,
+        &label,
+        &font,
+        8.0,
+        (26.0 - th as f64) / 2.0,
+        (1.0, 1.0, 1.0, 1.0),
+    );
 }
 
 impl SessionHost for App {
@@ -241,12 +322,77 @@ impl SessionHost for App {
     }
 
     fn on_key(&mut self, keycode: u32, pressed: bool) {
+        const KEY_F: u32 = 33;
         const KEY_PGUP: u32 = 104;
         const KEY_PGDN: u32 = 109;
         if !pressed || !self.focused {
             return;
         }
         let Some(k) = self.kbd.as_ref() else { return };
+        // search: Ctrl+Shift+F opens; while open, keys edit/jump/close
+        if self.search.is_some() {
+            match keycode {
+                KEY_ESC => {
+                    self.search = None;
+                    self.last_match = None;
+                    if let Some(m) = self.model.as_mut() {
+                        m.grid.scroll_view(-(m.grid.view as i32));
+                        m.grid.mark_all_dirty();
+                    }
+                    self.needs_render = true;
+                    return;
+                }
+                KEY_ENTER => {
+                    let q = self.search.clone().unwrap_or_default();
+                    let matches = self.search_matches(&q);
+                    if !matches.is_empty() {
+                        let start = self
+                            .last_match
+                            .and_then(|cur| matches.iter().position(|m| *m > cur))
+                            .unwrap_or(0);
+                        let target = matches[start];
+                        self.last_match = Some(target);
+                        self.jump_to_row(target);
+                        if let Some(m) = self.model.as_mut() {
+                            m.grid.mark_all_dirty();
+                        }
+                        self.needs_render = true;
+                    }
+                    return;
+                }
+                KEY_BACKSPACE => {
+                    if let Some(q) = self.search.as_mut() {
+                        q.pop();
+                    }
+                    self.last_match = None;
+                    if let Some(m) = self.model.as_mut() {
+                        m.grid.mark_all_dirty();
+                    }
+                    self.needs_render = true;
+                    return;
+                }
+                _ => {
+                    let ev = k.translate(keycode + 8);
+                    if !ev.utf8.is_empty() && ev.utf8.chars().all(|c| !c.is_control()) {
+                        if let Some(q) = self.search.as_mut() {
+                            q.push_str(&ev.utf8);
+                        }
+                        self.last_match = None;
+                        if let Some(m) = self.model.as_mut() {
+                            m.grid.mark_all_dirty();
+                        }
+                        self.needs_render = true;
+                    }
+                    return;
+                }
+            }
+        }
+        if k.ctrl_held() && k.shift_held() && keycode == KEY_F {
+            self.search = Some(String::new());
+            self.last_match = None;
+            self.needs_render = true;
+            return;
+        }
         // scrollback: Shift+PageUp/Down (UX-SPEC power layer)
         if k.shift_held() && (keycode == KEY_PGUP || keycode == KEY_PGDN) {
             if let Some(m) = self.model.as_mut() {
@@ -257,10 +403,7 @@ impl SessionHost for App {
                     m.grid.scroll_view(-step);
                 }
             }
-            let _ = self.render_if_dirty();
-            if let Some(conn) = &self.conn {
-                let _ = conn.flush();
-            }
+            self.needs_render = true;
             return;
         }
         let ev = k.translate(keycode + 8);
@@ -416,6 +559,15 @@ fn main() {
         if app.render_if_dirty() {
             if let Some(c) = &app.conn {
                 let _ = c.flush();
+            }
+        }
+
+        // render requested by event handlers (never render inside the
+        // dispatch callback — requests during dispatch stall the queue)
+        if app.needs_render {
+            app.needs_render = false;
+            if app.render_if_dirty() {
+                let _ = conn.flush();
             }
         }
 

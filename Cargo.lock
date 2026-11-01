@@ -564,8 +564,10 @@ dependencies = [
 name = "ibde-terminal"
 version = "0.1.0"
 dependencies = [
+ "cairo-rs",
  "ibde-ui",
  "libc",
+ "pango",
  "portable-pty",
  "vte",
 ]

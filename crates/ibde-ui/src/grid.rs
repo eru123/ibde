@@ -195,6 +195,18 @@ impl TextGrid {
         self.history.len()
     }
 
+    /// Text of absolute history row `a` (0 = oldest).
+    pub fn history_row_text(&self, a: usize) -> String {
+        self.history
+            .get(a)
+            .map(|row| {
+                row.iter()
+                    .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn cols(&self) -> usize {
         self.cols
     }
