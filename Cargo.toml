@@ -4,6 +4,7 @@ members = [
     "crates/ibde-ui",
     "crates/ibde-terminal",
     "crates/ibde-shell",
+    "crates/ibde-settings",
     "ui/spike-rs",
     "tools/kb-inject",
     "tools/ptr-inject",

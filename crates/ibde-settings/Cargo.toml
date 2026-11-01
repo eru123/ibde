@@ -1,0 +1,17 @@
+[package]
+name = "ibde-settings"
+description = "IBDE settings daemon + CLI: schema-validated keyfiles over D-Bus (ADR-0006)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zbus.workspace = true
+
+[[bin]]
+name = "ibde-settingsd"
+path = "src/daemon.rs"
+
+[[bin]]
+name = "ibde-settings"
+path = "src/cli.rs"
