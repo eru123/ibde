@@ -176,11 +176,11 @@ impl Session {
         self.compositor.is_some() && self.shm.is_some()
     }
 
-    /// NOTE: there is deliberately no manual `keyboard()` binder. The
-    /// delegate macro binds `wl_keyboard` when (and only when) the seat
-    /// advertises the Keyboard capability — requesting a keyboard from a
-    /// seat that lacks one is a protocol error (wl_seat
-    /// `missing_capability`) that kills the connection.
+    // NOTE: there is deliberately no manual `keyboard()` binder. The
+    // delegate macro binds `wl_keyboard` when (and only when) the seat
+    // advertises the Keyboard capability — requesting a keyboard from a
+    // seat that lacks one is a protocol error (wl_seat
+    // `missing_capability`) that kills the connection.
 
     // Create a layer surface per `spec` and commit it; the configure
     // arrives asynchronously in `on_layer_configure`.
